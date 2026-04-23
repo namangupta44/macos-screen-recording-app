@@ -34,6 +34,24 @@ final class CameraCaptureManager: NSObject {
         ]
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
 
+        // Force a stable, well-defined PCM format out of the mic. Without
+        // this, AVCaptureAudioDataOutput hands us whatever the device is
+        // currently producing — which can change sample rate / channel
+        // count / float vs int between recording sessions (especially when
+        // we detach and re-attach the audio input between preview and
+        // recording). That causes the AVAssetWriter's AAC encoder to
+        // prime on one format and then get fed another on the next run,
+        // which is audible as heavy distortion / pitch shift on every
+        // recording after the first.
+        audioOutput.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
         audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
 
         if session.canAddOutput(videoOutput) {

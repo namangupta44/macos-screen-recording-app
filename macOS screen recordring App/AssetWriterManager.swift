@@ -12,6 +12,7 @@ final class AssetWriterManager {
 
     private var sourceStartTime: CMTime?
     private var appendedVideoFrameCount = 0
+    private var primedAudioFormat: CMFormatDescription?
 
     init(outputURL: URL, outputSize: CGSize) throws {
         self.outputURL = outputURL
@@ -34,16 +35,29 @@ final class AssetWriterManager {
         )
         videoInput.expectsMediaDataInRealTime = true
 
+        // Use AAC so AVAssetWriter handles sample-rate / channel-count /
+        // bit-depth conversion for us. If we ask for Linear PCM here, the
+        // writer does *no* conversion and the input sample buffers must
+        // match the output settings byte-for-byte — otherwise the audio
+        // gets reinterpreted as the wrong format and comes out distorted.
+        // AVCaptureAudioDataOutput on macOS hands us 32-bit float,
+        // non-interleaved buffers at the device's native sample rate, so
+        // encoding to AAC is both safer and what we actually want.
+        var audioChannelLayout = AudioChannelLayout()
+        audioChannelLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo
+        let channelLayoutData = Data(
+            bytes: &audioChannelLayout,
+            count: MemoryLayout<AudioChannelLayout>.size
+        )
+
         audioInput = AVAssetWriterInput(
             mediaType: .audio,
             outputSettings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: 48_000,
-                AVNumberOfChannelsKey: 1,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 192_000,
+                AVChannelLayoutKey: channelLayoutData
             ]
         )
         audioInput.expectsMediaDataInRealTime = true
@@ -117,6 +131,20 @@ final class AssetWriterManager {
         guard audioInput.isReadyForMoreMediaData else { return }
         guard let sourceStartTime else { return }
         guard sampleBuffer.presentationTimeStamp >= sourceStartTime else { return }
+
+        // Lock the audio format to the first buffer we accept. Any later
+        // buffer that arrives with a different ASBD (different sample
+        // rate, channel count, or sample format) would poison the AAC
+        // encoder mid-stream and come out distorted, so drop it instead.
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+        if let primedAudioFormat {
+            if !CMFormatDescriptionEqual(primedAudioFormat, otherFormatDescription: formatDescription) {
+                return
+            }
+        } else {
+            primedAudioFormat = formatDescription
+        }
+
         guard let adjustedBuffer = sampleBuffer.offsettingTime(by: sourceStartTime) else {
             throw RecorderError.audioAppendFailed
         }
