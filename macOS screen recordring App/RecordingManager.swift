@@ -74,7 +74,7 @@ final class RecordingManager: ObservableObject {
     }
 
     var shouldShowPermissionActions: Bool {
-        !isRecording && (needsScreenRecordingPermission || needsCameraPermission || needsMicrophonePermission)
+        !isRecording && (needsScreenRecordingPermission || needsScreenRecordingPermissionForPreview || needsCameraPermission || needsMicrophonePermission)
     }
 
     var shouldShowGrantPermissionsButton: Bool {
@@ -86,7 +86,7 @@ final class RecordingManager: ObservableObject {
     }
 
     var shouldShowRelaunchButton: Bool {
-        !isRecording && needsScreenRecordingPermission
+        !isRecording && (needsScreenRecordingPermission || needsScreenRecordingPermissionForPreview)
     }
 
     var isUsingSystemPickedSource: Bool {
@@ -115,10 +115,14 @@ final class RecordingManager: ObservableObject {
         }
 
         if let selectedPickerSourceName {
-            return "\(selectedPickerSourceName) (system picker)"
+            return selectedPickerSourceName
         }
 
         return ""
+    }
+
+    var needsScreenRecordingPermissionForPreview: Bool {
+        !permissionsManager.hasScreenRecordingAccess()
     }
 
     private let defaults = UserDefaults.standard
@@ -276,12 +280,12 @@ final class RecordingManager: ObservableObject {
         guard hasSelectedSource else {
             previewMessage = hasScreenRecordingPermission
                 ? "Choose a display or window from the list, or use Choose Screen Source to see the composited preview."
-                : "Choose Screen Source, or enable Screen Recording in System Settings and then refresh."
+                : "Enable Screen Recording for this app in System Settings > Privacy & Security > Screen & System Audio Recording, then relaunch this app."
             return
         }
 
         guard canCapturePreview else {
-            previewMessage = "Screen Recording access is not active for preview yet."
+            previewMessage = screenRecordingRelaunchMessage()
             permissionMessage = buildPermissionMessage()
             updateStatusMessage()
             updateStartDisabledReason()
@@ -673,9 +677,17 @@ final class RecordingManager: ObservableObject {
             stopPreviewTimer()
             previewImage = nil
             applyScreenCaptureFailure(error, status: error.localizedDescription)
-            previewMessage = error.localizedDescription
+            if isScreenCapturePermissionError(error) || !permissionsManager.hasScreenRecordingAccess() {
+                previewMessage = screenRecordingRelaunchMessage()
+            } else {
+                previewMessage = error.localizedDescription
+            }
             return false
         }
+    }
+
+    private func screenRecordingRelaunchMessage() -> String {
+        "Screen Recording access is required to preview and record.\n\nIf the toggle is already ON in System Settings > Privacy & Security > Screen & System Audio Recording, macOS still requires this app to be relaunched for the change to take effect. Click Relaunch App below."
     }
 
     private func syncPreviewOverlayLayout() {
@@ -837,15 +849,15 @@ final class RecordingManager: ObservableObject {
             if let screenName = NSScreen.screens.first(where: {
                 $0.frame.approximatelyEquals(to: contentRect)
             })?.localizedName {
-                return "\(screenName) Display"
+                return "\(screenName) — Entire Display"
             }
-            return "Selected display"
+            return "Entire Display"
         case .window:
-            return "Selected window"
+            return "Selected Window"
         case .application:
-            return "Selected application"
+            return "Selected Application"
         default:
-            return "Selected source"
+            return "Selected Source"
         }
     }
 

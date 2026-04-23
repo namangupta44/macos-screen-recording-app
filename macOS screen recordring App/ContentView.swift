@@ -17,10 +17,6 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     LabeledContent("Screen Source") {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(recordingManager.screenSourcePickerLabel)
-                                .foregroundStyle(recordingManager.hasSelectedScreenSource ? .primary : .secondary)
-                                .frame(maxWidth: 360, alignment: .leading)
-
                             if !recordingManager.screenTargets.isEmpty {
                                 Picker("Screen Source", selection: $recordingManager.selectedTargetID) {
                                     ForEach(recordingManager.screenTargets) { target in
@@ -31,18 +27,29 @@ struct ContentView: View {
                                 .frame(maxWidth: 360)
 
                                 if recordingManager.isUsingSystemPickedSource {
-                                    Text("Using the system-picked source until it can be matched to the source list.")
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } else {
-                                Text("Use Choose Screen Source to select a display or window.")
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.green)
+                                        Text(recordingManager.selectedSourceSummary)
+                                            .foregroundStyle(.primary)
+                                    }
                                     .font(.footnote)
+                                }
+                            } else if recordingManager.hasSelectedScreenSource {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                    Text(recordingManager.selectedSourceSummary)
+                                        .foregroundStyle(.primary)
+                                }
+                                .frame(maxWidth: 360, alignment: .leading)
+                            } else {
+                                Text(recordingManager.screenSourcePickerLabel)
                                     .foregroundStyle(.secondary)
                                     .frame(maxWidth: 360, alignment: .leading)
                             }
 
-                            Button("Choose Screen Source") {
+                            Button(recordingManager.hasSelectedScreenSource ? "Change Screen Source…" : "Choose Screen Source…") {
                                 recordingManager.presentScreenSourcePicker()
                             }
                             .disabled(recordingManager.isRecording)
@@ -107,14 +114,34 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .padding(16)
                     } else {
-                        VStack(spacing: 10) {
-                            Image(systemName: "display")
+                        VStack(spacing: 12) {
+                            Image(systemName: recordingManager.needsScreenRecordingPermissionForPreview ? "lock.display" : "display")
                                 .font(.system(size: 28, weight: .medium))
                                 .foregroundStyle(.secondary)
                             Text(recordingManager.previewMessage)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                                 .frame(maxWidth: 420)
+
+                            if recordingManager.needsScreenRecordingPermissionForPreview {
+                                HStack(spacing: 8) {
+                                    Button("Open System Settings") {
+                                        recordingManager.openSystemSettings()
+                                    }
+
+                                    Button("Relaunch App") {
+                                        recordingManager.relaunchApplication()
+                                    }
+                                    .buttonStyle(.borderedProminent)
+
+                                    Button("Refresh") {
+                                        Task {
+                                            await recordingManager.refreshSources(forceScreenTargetReload: true)
+                                            await recordingManager.refreshPreview()
+                                        }
+                                    }
+                                }
+                            }
                         }
                         .padding(24)
                     }
