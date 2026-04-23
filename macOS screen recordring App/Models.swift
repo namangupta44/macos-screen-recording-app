@@ -2,27 +2,6 @@
 import AppKit
 import Foundation
 
-struct ScreenTarget: Identifiable, Hashable {
-    enum Kind: String, Hashable {
-        case display
-        case window
-    }
-
-    let id: String
-    let name: String
-    let kind: Kind
-    let frame: CGRect
-
-    var kindTitle: String {
-        switch kind {
-        case .display:
-            return "Display"
-        case .window:
-            return "Window"
-        }
-    }
-}
-
 struct CaptureDevice: Identifiable, Hashable {
     let id: String
     let name: String

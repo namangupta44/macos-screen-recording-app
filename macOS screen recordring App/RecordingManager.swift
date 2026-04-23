@@ -2,11 +2,12 @@ import AVFoundation
 import AppKit
 import Combine
 import CoreMedia
+import CoreVideo
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 enum RecorderError: LocalizedError {
-    case targetUnavailable
+    case sourceNotSelected
     case cameraConfigurationFailed
     case microphoneConfigurationFailed
     case writerSetupFailed
@@ -14,11 +15,12 @@ enum RecorderError: LocalizedError {
     case audioAppendFailed
     case noScreenFramesCaptured
     case saveCancelled
+    case streamFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .targetUnavailable:
-            return "The selected display or window is no longer available."
+        case .sourceNotSelected:
+            return "Choose a screen or window to record first."
         case .cameraConfigurationFailed:
             return "The camera session could not be configured."
         case .microphoneConfigurationFailed:
@@ -33,98 +35,54 @@ enum RecorderError: LocalizedError {
             return "No screen frames were captured. Re-select the source and try again."
         case .saveCancelled:
             return "Save was cancelled."
+        case .streamFailed(let message):
+            return "The screen capture stream stopped: \(message)"
         }
     }
 }
 
-private enum ScreenCaptureAccessState {
-    case unknown
-    case granted
-    case denied
-}
-
 @MainActor
 final class RecordingManager: ObservableObject {
-    @Published var screenTargets: [ScreenTarget] = []
+    // MARK: - UI state
     @Published var cameraDevices: [CaptureDevice] = []
     @Published var microphoneDevices: [CaptureDevice] = []
-
-    @Published var selectedTargetID: String?
     @Published var selectedCameraID: String?
     @Published var selectedMicrophoneID: String?
     @Published var webcamSizeFraction: Double
 
     @Published var isRecording = false
     @Published var elapsedTimeText = "00:00"
-    @Published var statusMessage = "Ready."
+    @Published var statusMessage = "Click Choose Screen Source to begin."
     @Published var permissionMessage = ""
     @Published var lastOutputPath = ""
-    @Published private(set) var hasScreenRecordingPermission = false
-    @Published var previewImage: NSImage?
-    @Published var previewMessage = "Choose a display and camera to see the recording preview."
-    @Published var startDisabledReason = "Choose a display or window to record."
-    @Published var screenCaptureDiagnostics = ""
 
-    var webcamSizeLabel: String {
-        "\(Int(webcamSizeFraction * 100))%"
-    }
+    @Published var previewImage: NSImage?
+    @Published var previewMessage = "Click Choose Screen Source to see a live preview."
+    @Published var pickedSourceName: String?
+
+    // MARK: - Computed
+    var webcamSizeLabel: String { "\(Int(webcamSizeFraction * 100))%" }
+
+    var hasPickedSource: Bool { pickedSelection != nil }
 
     var canStartRecording: Bool {
-        !isRecording && hasSelectedSource && selectedCameraID != nil && selectedMicrophoneID != nil
+        !isRecording && hasPickedSource && selectedCameraID != nil && selectedMicrophoneID != nil
     }
 
-    var shouldShowPermissionActions: Bool {
-        !isRecording && (needsScreenRecordingPermission || needsScreenRecordingPermissionForPreview || needsCameraPermission || needsMicrophonePermission)
-    }
+    var canRevealLastRecording: Bool { !lastOutputPath.isEmpty }
 
-    var shouldShowGrantPermissionsButton: Bool {
-        !isRecording && (needsCameraPermission || needsMicrophonePermission)
-    }
-
-    var canRevealLastRecording: Bool {
-        !lastOutputPath.isEmpty
-    }
-
-    var shouldShowRelaunchButton: Bool {
-        !isRecording && (needsScreenRecordingPermission || needsScreenRecordingPermissionForPreview)
-    }
-
-    var isUsingSystemPickedSource: Bool {
-        selectedTarget == nil && selectedPickerSelection != nil
-    }
-
-    var hasSelectedScreenSource: Bool {
-        hasSelectedSource
-    }
-
-    var screenSourcePickerLabel: String {
-        if let summary = selectedSourceSummary.nilIfEmpty {
-            return summary
-        }
-
-        if screenTargets.isEmpty {
-            return "No screen source selected"
-        }
-
-        return "Main display will be selected automatically when available."
-    }
-
-    var selectedSourceSummary: String {
-        if let selectedTarget {
-            return selectedTarget.name
-        }
-
-        if let selectedPickerSourceName {
-            return selectedPickerSourceName
-        }
-
+    var startDisabledReason: String {
+        if !hasPickedSource { return "Click Choose Screen Source to pick a display or window." }
+        if selectedCameraID == nil { return "Choose a camera to continue." }
+        if selectedMicrophoneID == nil { return "Choose a microphone to continue." }
         return ""
     }
 
-    var needsScreenRecordingPermissionForPreview: Bool {
-        !permissionsManager.hasScreenRecordingAccess()
+    var needsAVPermissionsPrompt: Bool {
+        !isRecording && (needsCameraPermission || needsMicrophonePermission)
     }
 
+    // MARK: - Collaborators
     private let defaults = UserDefaults.standard
     private let deviceManager = DeviceManager()
     private let permissionsManager = PermissionsManager()
@@ -134,6 +92,7 @@ final class RecordingManager: ObservableObject {
     private let screenSourcePickerManager = ScreenSourcePickerManager()
     private let cameraFrameStore = LatestCameraFrameStore()
     private let previewCompositor = VideoCompositor()
+
     private lazy var pipeline: RecordingPipeline = {
         let pipeline = RecordingPipeline(
             cameraFrameStore: cameraFrameStore,
@@ -147,203 +106,100 @@ final class RecordingManager: ObservableObject {
         return pipeline
     }()
 
+    // MARK: - Private state
+    private var pickedSelection: ScreenCaptureSelection?
     private var elapsedTimer: Timer?
-    private var previewTimer: Timer?
     private var recordingStartDate: Date?
-    private let previewSize = CGSize(width: 960, height: 540)
-    private var selectedPickerSelection: ScreenCaptureSelection?
-    private var selectedPickerSourceName: String?
-    private var screenCaptureAccessState: ScreenCaptureAccessState = .unknown
-    private var shouldForceScreenTargetReloadOnActivation = false
+    private let previewCanvasSize = CGSize(width: 1280, height: 720)
+    private let recordingCanvasSize = CGSize(width: 1920, height: 1080)
+    private var lastPreviewRender = Date.distantPast
+    private let previewThrottleInterval: TimeInterval = 1.0 / 20.0
+
+    // MARK: - Lifecycle
 
     init() {
         webcamSizeFraction = defaults.object(forKey: "overlay.sizeFraction") as? Double ?? 0.18
-        syncScreenRecordingPermissionState()
+        configureCameraCallbacks()
+        configureScreenCaptureCallbacks()
         configureScreenSourcePickerCallbacks()
     }
 
     func prepare() async {
-        await refreshSources()
-        await refreshPreview()
+        reloadDevices()
+        startCameraPreviewIfPossible()
+        refreshStatus()
     }
 
     func applicationDidBecomeActive() async {
-        let shouldForceReload = shouldForceScreenTargetReloadOnActivation
-        shouldForceScreenTargetReloadOnActivation = false
-        syncScreenRecordingPermissionState()
-        await refreshSources(forceScreenTargetReload: shouldForceReload)
-        await refreshPreview()
+        // IMPORTANT: no SCShareableContent / Preflight / SCContentSharingPicker
+        // calls here. Anything that touches those APIs while we lack TCC will
+        // re-fire the macOS Screen Recording prompt on every single activation.
+        reloadDevices()
+        startCameraPreviewIfPossible()
     }
 
-    func refreshSources(forceScreenTargetReload: Bool = false) async {
-        let cameras = deviceManager.loadVideoDevices()
-        let microphones = deviceManager.loadAudioDevices()
-        syncScreenRecordingPermissionState()
+    // MARK: - Device handling
 
-        cameraDevices = cameras
-        microphoneDevices = microphones
-        selectedCameraID = resolveSelection(current: selectedCameraID, candidates: cameras.map(\.id), key: "selected.camera")
-        selectedMicrophoneID = resolveSelection(current: selectedMicrophoneID, candidates: microphones.map(\.id), key: "selected.microphone")
-        screenCaptureDiagnostics = ""
+    private func reloadDevices() {
+        cameraDevices = deviceManager.loadVideoDevices()
+        microphoneDevices = deviceManager.loadAudioDevices()
 
-        guard forceScreenTargetReload || shouldAttemptAutomaticScreenTargetRefresh else {
-            screenTargets = []
-
-            if selectedPickerSelection == nil {
-                selectedTargetID = nil
-            }
-
-            hasScreenRecordingPermission = selectedPickerSelection != nil
-            permissionMessage = buildPermissionMessage()
-            updateStatusMessage(cameraDevices: cameras, microphoneDevices: microphones)
-            updateStartDisabledReason()
-            return
-        }
-
-        guard selectedPickerSelection != nil || permissionsManager.hasScreenRecordingAccess() else {
-            screenCaptureAccessState = .denied
-            hasScreenRecordingPermission = false
-            screenTargets = []
-            selectedTargetID = nil
-            permissionMessage = buildPermissionMessage()
-            updateStatusMessage(cameraDevices: cameras, microphoneDevices: microphones)
-            updateStartDisabledReason()
-            return
-        }
-
-        do {
-            let targets = try await deviceManager.loadScreenTargets()
-            screenTargets = targets
-            if reconcileSystemPickedSource(with: targets) == false, selectedPickerSelection == nil {
-                selectedTargetID = resolveTargetSelection(current: selectedTargetID, targets: targets)
-            }
-            screenCaptureAccessState = .granted
-            hasScreenRecordingPermission = true
-        } catch {
-            let hasPickerSelection = selectedPickerSelection != nil
-            screenTargets = []
-
-            if !hasPickerSelection {
-                selectedTargetID = nil
-            }
-
-            screenCaptureDiagnostics = describe(error)
-
-            if isScreenCapturePermissionError(error) {
-                screenCaptureAccessState = hasPickerSelection ? .granted : .denied
-                hasScreenRecordingPermission = hasPickerSelection
-            } else {
-                hasScreenRecordingPermission = hasPickerSelection || screenCaptureAccessState == .granted
-                permissionMessage = buildPermissionMessage()
-                statusMessage = hasPickerSelection
-                    ? "Using the system-picked source while the source list is unavailable."
-                    : "The app could not load the display and window list."
-                updateStartDisabledReason()
-                return
-            }
-        }
-
-        permissionMessage = buildPermissionMessage()
-        updateStatusMessage(cameraDevices: cameras, microphoneDevices: microphones)
-        updateStartDisabledReason()
+        selectedCameraID = resolveSelection(
+            current: selectedCameraID,
+            candidates: cameraDevices.map(\.id),
+            key: "selected.camera"
+        )
+        selectedMicrophoneID = resolveSelection(
+            current: selectedMicrophoneID,
+            candidates: microphoneDevices.map(\.id),
+            key: "selected.microphone"
+        )
     }
 
-    func refreshPreview() async {
-        stopPreviewTimer()
-        previewImage = nil
-        syncPreviewOverlayLayout()
-        syncScreenRecordingPermissionState()
-
-        guard !isRecording else { return }
-
-        cameraCaptureManager.onVideoFrame = { [weak self] pixelBuffer, _ in
-            self?.cameraFrameStore.update(pixelBuffer)
-        }
-        cameraCaptureManager.onAudioSampleBuffer = nil
-
-        guard let selectedCameraID else {
-            cameraCaptureManager.stopRunning()
-            previewMessage = cameraDevices.isEmpty
-                ? "Connect or enable a camera to see a preview."
-                : "Choose a camera to see a preview."
-            return
-        }
-
-        do {
-            try cameraCaptureManager.configure(videoDeviceID: selectedCameraID, audioDeviceID: nil)
-            cameraCaptureManager.startRunning()
-        } catch {
-            previewMessage = error.localizedDescription
-            return
-        }
-
-        guard hasSelectedSource else {
-            previewMessage = hasScreenRecordingPermission
-                ? "Choose a display or window from the list, or use Choose Screen Source to see the composited preview."
-                : "Enable Screen Recording for this app in System Settings > Privacy & Security > Screen & System Audio Recording, then relaunch this app."
-            return
-        }
-
-        guard canCapturePreview else {
-            previewMessage = screenRecordingRelaunchMessage()
-            permissionMessage = buildPermissionMessage()
-            updateStatusMessage()
-            updateStartDisabledReason()
-            return
-        }
-
-        previewMessage = "Loading preview..."
-        if await capturePreviewFrame() {
-            startPreviewTimer()
-        }
+    private func resolveSelection(current: String?, candidates: [String], key: String) -> String? {
+        if let current, candidates.contains(current) { return current }
+        if let stored = defaults.string(forKey: key), candidates.contains(stored) { return stored }
+        return candidates.first
     }
 
-    func selectedTargetChanged() async {
-        if selectedTargetID != nil {
-            clearSystemPickedSource()
-        }
-        defaults.set(selectedTargetID, forKey: "selected.target")
-        updateStartDisabledReason()
-        await refreshPreview()
-    }
+    // MARK: - User actions
 
-    func selectedCameraChanged() async {
+    func selectedCameraChanged() {
         defaults.set(selectedCameraID, forKey: "selected.camera")
-        updateStartDisabledReason()
-        await refreshPreview()
+        startCameraPreviewIfPossible()
+        refreshStatus()
     }
 
     func selectedMicrophoneChanged() {
         defaults.set(selectedMicrophoneID, forKey: "selected.microphone")
-        updateStartDisabledReason()
+        refreshStatus()
     }
 
-    func webcamSizeChanged() async {
+    func webcamSizeChanged() {
         defaults.set(webcamSizeFraction, forKey: "overlay.sizeFraction")
         syncPreviewOverlayLayout()
-        _ = await capturePreviewFrame()
     }
 
-    func requestPermissions() async {
+    func presentScreenSourcePicker() {
+        statusMessage = "Opening system source picker…"
+        screenSourcePickerManager.present()
+    }
+
+    func requestAVPermissions() async {
         switch await permissionsManager.ensureAVPermissions() {
         case .granted:
-            statusMessage = "Ready."
+            permissionMessage = ""
+            reloadDevices()
+            startCameraPreviewIfPossible()
+            refreshStatus()
         case .denied(let message):
             permissionMessage = message
-            statusMessage = "Permission missing."
+            statusMessage = "Permission required."
         }
-
-        await refreshSources(forceScreenTargetReload: true)
-        await refreshPreview()
     }
 
-    func openSystemSettings() {
-        shouldForceScreenTargetReloadOnActivation = true
-        permissionsManager.openSystemSettings()
-    }
-
-    func relaunchApplication() {
-        permissionsManager.relaunchApplication()
+    func openPrivacySettings() {
+        permissionsManager.openPrivacySettings()
     }
 
     func revealLastRecording() {
@@ -351,13 +207,13 @@ final class RecordingManager: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: lastOutputPath)])
     }
 
-    func presentScreenSourcePicker() {
-        statusMessage = "Opening the system source picker..."
-        screenSourcePickerManager.present()
-    }
-
     func startRecording() async {
-        guard await ensurePermissions() else { return }
+        guard !isRecording else { return }
+        guard let pickedSelection else {
+            statusMessage = "Choose a screen source to continue."
+            return
+        }
+        guard await ensureAVPermissions() else { return }
         guard selectedCameraID != nil else {
             statusMessage = "Choose a camera to continue."
             return
@@ -367,57 +223,45 @@ final class RecordingManager: ObservableObject {
             return
         }
 
-        let activeSelection: (selection: ScreenCaptureSelection, sourceName: String)
+        statusMessage = "Preparing recording…"
 
+        let outputURL: URL
         do {
-            activeSelection = try await currentCaptureSelection()
+            outputURL = try await requestOutputURL()
+        } catch RecorderError.saveCancelled {
+            statusMessage = "Ready."
+            return
         } catch {
-            applyScreenCaptureFailure(error, status: "Choose a display or window to record.")
-            await refreshPreview()
+            statusMessage = error.localizedDescription
             return
         }
 
-        permissionMessage = ""
-        statusMessage = "Preparing recording..."
-        stopPreviewTimer()
-
         do {
-            let outputURL = try await requestOutputURL()
-
-            try cameraCaptureManager.configure(videoDeviceID: selectedCameraID, audioDeviceID: selectedMicrophoneID)
-            cameraCaptureManager.onVideoFrame = { [weak self] pixelBuffer, _ in
-                self?.cameraFrameStore.update(pixelBuffer)
-            }
+            try cameraCaptureManager.configure(
+                videoDeviceID: selectedCameraID,
+                audioDeviceID: selectedMicrophoneID
+            )
             cameraCaptureManager.onAudioSampleBuffer = { [weak self] sampleBuffer in
                 self?.pipeline.appendAudio(sampleBuffer)
             }
 
-            try pipeline.start(outputURL: outputURL, outputSize: CGSize(width: 1920, height: 1080))
+            try pipeline.start(outputURL: outputURL, outputSize: recordingCanvasSize)
 
-            screenCaptureManager.onScreenSampleBuffer = { [weak self] sampleBuffer in
+            screenCaptureManager.onRecordingSampleBuffer = { [weak self] sampleBuffer in
                 self?.pipeline.appendScreen(sampleBuffer)
             }
 
             cameraCaptureManager.startRunning()
+
             overlayPanelManager.show(
                 session: cameraCaptureManager.session,
-                contentRect: activeSelection.selection.contentRect,
+                contentRect: pickedSelection.contentRect,
                 sizeFraction: webcamSizeFraction
             )
-            try await screenCaptureManager.start(filter: activeSelection.selection.filter)
-
-            defaults.set(selectedTargetID, forKey: "selected.target")
-            defaults.set(selectedCameraID, forKey: "selected.camera")
-            defaults.set(selectedMicrophoneID, forKey: "selected.microphone")
 
             isRecording = true
-            statusMessage = "Recording..."
-            screenCaptureAccessState = .granted
-            hasScreenRecordingPermission = true
-            screenCaptureDiagnostics = ""
+            statusMessage = "Recording…"
             startElapsedTimer()
-        } catch RecorderError.saveCancelled {
-            statusMessage = "Ready."
         } catch {
             await cleanupAfterFailure(error)
         }
@@ -426,13 +270,13 @@ final class RecordingManager: ObservableObject {
     func stopRecording() async {
         guard isRecording else { return }
 
-        statusMessage = "Finishing recording..."
+        statusMessage = "Finishing recording…"
         stopElapsedTimer()
         isRecording = false
 
-        await screenCaptureManager.stop()
+        screenCaptureManager.onRecordingSampleBuffer = nil
         overlayPanelManager.hide()
-        cameraCaptureManager.stopRunning()
+        cameraCaptureManager.onAudioSampleBuffer = nil
 
         do {
             let outputURL = try await pipeline.finish()
@@ -442,391 +286,136 @@ final class RecordingManager: ObservableObject {
             statusMessage = error.localizedDescription
         }
 
-        await refreshPreview()
+        // Drop the microphone input so we don't keep it hot between takes.
+        startCameraPreviewIfPossible()
+        refreshStatus()
     }
 
-    private var selectedTarget: ScreenTarget? {
-        screenTargets.first(where: { $0.id == selectedTargetID })
-    }
+    // MARK: - Camera preview (always-on AVCapture session)
 
-    private var hasSelectedSource: Bool {
-        selectedTarget != nil || selectedPickerSelection != nil
-    }
-
-    private var hasUsableScreenRecordingAccess: Bool {
-        screenCaptureAccessState == .granted || selectedPickerSelection != nil
-    }
-
-    private var canCapturePreview: Bool {
-        selectedPickerSelection != nil || permissionsManager.hasScreenRecordingAccess()
-    }
-
-    private var shouldAttemptAutomaticScreenTargetRefresh: Bool {
-        screenCaptureAccessState != .denied
-    }
-
-    private var needsScreenRecordingPermission: Bool {
-        screenCaptureAccessState == .denied && selectedPickerSelection == nil
-    }
-
-    private var needsCameraPermission: Bool {
-        permissionsManager.permissionState(for: .video) != .authorized
-    }
-
-    private var needsMicrophonePermission: Bool {
-        permissionsManager.permissionState(for: .audio) != .authorized
-    }
-
-    private func ensurePermissions() async -> Bool {
-        statusMessage = "Checking camera and microphone permissions..."
-
-        switch await permissionsManager.ensureAVPermissions() {
-        case .granted:
-            await refreshSources(forceScreenTargetReload: selectedPickerSelection == nil)
-            permissionMessage = buildPermissionMessage()
-            return true
-        case .denied(let message):
-            permissionMessage = buildPermissionMessage()
-
-            if permissionMessage.isEmpty {
-                permissionMessage = message
-            }
-
-            statusMessage = "Permission missing."
-            await refreshSources(forceScreenTargetReload: true)
-            return false
+    private func configureCameraCallbacks() {
+        cameraCaptureManager.onVideoFrame = { [weak self] pixelBuffer, _ in
+            self?.cameraFrameStore.update(pixelBuffer)
         }
     }
 
-    private func buildPermissionMessage() -> String {
-        var messages: [String] = []
+    private func startCameraPreviewIfPossible() {
+        // Never reconfigure the AVCaptureSession while a recording is in
+        // flight — doing so would yank the microphone input mid-recording
+        // and drop audio samples.
+        guard !isRecording else { return }
 
-        if needsScreenRecordingPermission {
-            messages.append("Screen Recording is unavailable for this app right now. Enable it in System Settings > Privacy & Security > Screen & System Audio Recording, then return and refresh or choose the source again.")
+        guard let selectedCameraID else {
+            cameraCaptureManager.stopRunning()
+            return
         }
 
-        if permissionsManager.permissionState(for: .video) == .denied {
-            messages.append("Enable Camera access in System Settings > Privacy & Security > Camera.")
+        guard permissionsManager.permissionState(for: .video) != .denied else {
+            cameraCaptureManager.stopRunning()
+            return
         }
-
-        if permissionsManager.permissionState(for: .audio) == .denied {
-            messages.append("Enable Microphone access in System Settings > Privacy & Security > Microphone.")
-        }
-
-        return messages.joined(separator: " ")
-    }
-
-    private func syncScreenRecordingPermissionState() {
-        if permissionsManager.hasScreenRecordingAccess() {
-            screenCaptureAccessState = .granted
-            hasScreenRecordingPermission = true
-        } else if selectedPickerSelection != nil {
-            screenCaptureAccessState = .granted
-            hasScreenRecordingPermission = true
-        } else {
-            screenCaptureAccessState = .denied
-            hasScreenRecordingPermission = false
-        }
-    }
-
-    private func startElapsedTimer() {
-        stopElapsedTimer()
-        recordingStartDate = Date()
-        elapsedTimeText = "00:00"
-
-        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let recordingStartDate = self.recordingStartDate else { return }
-                let interval = Int(Date().timeIntervalSince(recordingStartDate))
-                let minutes = interval / 60
-                let seconds = interval % 60
-                self.elapsedTimeText = String(format: "%02d:%02d", minutes, seconds)
-            }
-        }
-    }
-
-    private func stopElapsedTimer() {
-        elapsedTimer?.invalidate()
-        elapsedTimer = nil
-        recordingStartDate = nil
-        elapsedTimeText = "00:00"
-    }
-
-    private func cleanupAfterFailure(_ error: Error) async {
-        await screenCaptureManager.stop()
-        overlayPanelManager.hide()
-        cameraCaptureManager.stopRunning()
-        pipeline.cancel()
-        isRecording = false
-        stopElapsedTimer()
-        applyScreenCaptureFailure(error, status: error.localizedDescription)
-        previewMessage = "Preview stopped because recording setup failed."
-    }
-
-    private func resolveSelection(current: String?, candidates: [String], key: String) -> String? {
-        if let current, candidates.contains(current) {
-            return current
-        }
-
-        if let stored = defaults.string(forKey: key), candidates.contains(stored) {
-            return stored
-        }
-
-        return candidates.first
-    }
-
-    private func resolveTargetSelection(current: String?, targets: [ScreenTarget]) -> String? {
-        let candidateIDs = targets.map(\.id)
-
-        if let current, candidateIDs.contains(current) {
-            return current
-        }
-
-        if let stored = defaults.string(forKey: "selected.target"), candidateIDs.contains(stored) {
-            return stored
-        }
-
-        return preferredDefaultTarget(in: targets)?.id
-    }
-
-    private func preferredDefaultTarget(in targets: [ScreenTarget]) -> ScreenTarget? {
-        let mainDisplayID = "display-\(CGMainDisplayID())"
-
-        if let mainDisplay = targets.first(where: { $0.kind == .display && $0.id == mainDisplayID }) {
-            return mainDisplay
-        }
-
-        if let display = targets.first(where: { $0.kind == .display }) {
-            return display
-        }
-
-        return targets.first
-    }
-
-    private func requestOutputURL() async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
-            let panel = NSSavePanel()
-            panel.allowedContentTypes = [UTType.movie]
-            panel.canCreateDirectories = true
-            panel.nameFieldStringValue = "Recording-\(timestamp()).mov"
-            panel.prompt = "Record"
-            panel.begin { response in
-                if response == .OK, let url = panel.url {
-                    continuation.resume(returning: url)
-                } else {
-                    continuation.resume(throwing: RecorderError.saveCancelled)
-                }
-            }
-        }
-    }
-
-    private func timestamp() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
-        return formatter.string(from: .now)
-    }
-
-    private func startPreviewTimer() {
-        stopPreviewTimer()
-
-        previewTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                _ = await self?.capturePreviewFrame()
-            }
-        }
-    }
-
-    private func stopPreviewTimer() {
-        previewTimer?.invalidate()
-        previewTimer = nil
-    }
-
-    private func capturePreviewFrame() async -> Bool {
-        guard !isRecording else { return false }
 
         do {
-            let activeSelection = try await currentCaptureSelection()
-            let configuration = SCStreamConfiguration()
-            configuration.width = Int(previewSize.width)
-            configuration.height = Int(previewSize.height)
-            configuration.showsCursor = true
-
-            let screenImage = try await SCScreenshotManager.captureImage(
-                contentFilter: activeSelection.selection.filter,
-                configuration: configuration
-            )
-
-            let overlay = currentPreviewOverlayLayout()
-            let compositedImage = previewCompositor.previewImage(
-                screenImage: screenImage,
-                cameraPixelBuffer: cameraFrameStore.current(),
-                overlay: overlay,
-                outputSize: previewSize
-            ) ?? screenImage
-
-            previewImage = NSImage(cgImage: compositedImage, size: previewSize)
-            previewMessage = "Live preview"
-            screenCaptureAccessState = .granted
-            hasScreenRecordingPermission = true
-            screenCaptureDiagnostics = ""
-            permissionMessage = buildPermissionMessage()
-            updateStatusMessage()
-            updateStartDisabledReason()
-            return true
+            // Pass nil audio during preview — we only attach the mic when we
+            // actually start recording, so the user isn't holding the mic
+            // open while they compose.
+            try cameraCaptureManager.configure(videoDeviceID: selectedCameraID, audioDeviceID: nil)
+            cameraCaptureManager.startRunning()
         } catch {
-            stopPreviewTimer()
-            previewImage = nil
-            applyScreenCaptureFailure(error, status: error.localizedDescription)
-            if isScreenCapturePermissionError(error) || !permissionsManager.hasScreenRecordingAccess() {
-                previewMessage = screenRecordingRelaunchMessage()
-            } else {
-                previewMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Screen capture (picker-driven)
+
+    private func configureScreenCaptureCallbacks() {
+        screenCaptureManager.onPreviewPixelBuffer = { [weak self] pixelBuffer in
+            Task { @MainActor [weak self] in
+                self?.handlePreviewPixelBuffer(pixelBuffer)
             }
-            return false
         }
-    }
-
-    private func screenRecordingRelaunchMessage() -> String {
-        "Screen Recording access is required to preview and record.\n\nIf the toggle is already ON in System Settings > Privacy & Security > Screen & System Audio Recording, macOS still requires this app to be relaunched for the change to take effect. Click Relaunch App below."
-    }
-
-    private func syncPreviewOverlayLayout() {
-        var layout = overlayPanelManager.layoutStore.current()
-        layout.sizeFraction = webcamSizeFraction
-        overlayPanelManager.layoutStore.update(layout)
-    }
-
-    private func currentPreviewOverlayLayout() -> OverlayLayout {
-        syncPreviewOverlayLayout()
-        return overlayPanelManager.layoutStore.current()
-    }
-
-    private func updateStartDisabledReason() {
-        if !hasSelectedSource {
-            startDisabledReason = "Choose a display or window from the list, or use Choose Screen Source."
-        } else if selectedCameraID == nil {
-            startDisabledReason = "Choose a camera to continue."
-        } else if selectedMicrophoneID == nil {
-            startDisabledReason = "Choose a microphone to continue."
-        } else {
-            startDisabledReason = ""
-        }
-    }
-
-    private func isScreenCapturePermissionError(_ error: Error) -> Bool {
-        guard !permissionsManager.hasScreenRecordingAccess() else {
-            return false
-        }
-
-        let description = describe(error).localizedLowercase
-        return description.contains("declined")
-            || description.contains("tcc")
-            || description.contains("screen recording")
-            || description.contains("display capture")
-    }
-
-    private func updateStatusMessage(
-        cameraDevices: [CaptureDevice]? = nil,
-        microphoneDevices: [CaptureDevice]? = nil
-    ) {
-        let cameras = cameraDevices ?? self.cameraDevices
-        let microphones = microphoneDevices ?? self.microphoneDevices
-
-        if !hasSelectedSource {
-            if needsScreenRecordingPermission {
-                statusMessage = "Choose Screen Source, or grant Screen Recording access and refresh the source list."
-            } else if screenTargets.isEmpty {
-                statusMessage = "Use Choose Screen Source, or refresh the source list."
-            } else {
-                statusMessage = "Choose a display or window to continue."
+        screenCaptureManager.onStreamError = { [weak self] error in
+            Task { @MainActor [weak self] in
+                self?.handleStreamError(error)
             }
+        }
+    }
+
+    private func handlePreviewPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
+        let now = Date()
+        guard now.timeIntervalSince(lastPreviewRender) >= previewThrottleInterval else { return }
+        lastPreviewRender = now
+
+        guard let composedImage = previewCompositor.previewImage(
+            screenPixelBuffer: pixelBuffer,
+            cameraPixelBuffer: cameraFrameStore.current(),
+            overlay: currentPreviewOverlayLayout(),
+            outputSize: previewCanvasSize
+        ) else {
             return
         }
 
-        if hasSelectedSource {
-            if cameras.isEmpty {
-                statusMessage = "No camera devices are currently available."
-            } else if microphones.isEmpty {
-                statusMessage = "No microphone devices are currently available."
-            } else {
-                statusMessage = "Ready."
-            }
-            return
-        }
-
+        previewImage = NSImage(cgImage: composedImage, size: previewCanvasSize)
+        previewMessage = ""
     }
 
-    private func currentCaptureSelection() async throws -> (selection: ScreenCaptureSelection, sourceName: String) {
-        if let selectedTarget {
-            return (try await deviceManager.captureSelection(for: selectedTarget), selectedTarget.name)
+    private func handleStreamError(_ error: Error) {
+        let nsError = error as NSError
+        pickedSelection = nil
+        pickedSourceName = nil
+        previewImage = nil
+        overlayPanelManager.hide()
+
+        if isRecording {
+            isRecording = false
+            stopElapsedTimer()
+            pipeline.cancel()
+            cameraCaptureManager.onAudioSampleBuffer = nil
+            screenCaptureManager.onRecordingSampleBuffer = nil
         }
 
-        if let selectedPickerSelection {
-            return (selectedPickerSelection, selectedPickerSourceName ?? "System-picked source")
-        }
-
-        throw RecorderError.targetUnavailable
+        previewMessage = "The selected source stopped. Click Choose Screen Source to pick another."
+        statusMessage = "Capture stopped: \(nsError.localizedDescription)"
     }
 
     private func configureScreenSourcePickerCallbacks() {
         screenSourcePickerManager.onSelection = { [weak self] filter in
             Task { @MainActor [weak self] in
-                self?.applySystemPickedSource(filter)
+                await self?.applyPickerFilter(filter)
             }
         }
         screenSourcePickerManager.onCancel = { [weak self] in
             Task { @MainActor [weak self] in
-                self?.statusMessage = "Source picking was cancelled."
+                self?.refreshStatus()
             }
         }
         screenSourcePickerManager.onError = { [weak self] error in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.applyScreenCaptureFailure(error, status: "The system source picker could not be opened.")
+                self?.statusMessage = "Couldn't open source picker: \(error.localizedDescription)"
             }
         }
     }
 
-    private func applySystemPickedSource(_ filter: SCContentFilter) {
-        selectedPickerSelection = selection(from: filter)
-        selectedPickerSourceName = sourceName(for: filter)
-        selectedTargetID = nil
+    private func applyPickerFilter(_ filter: SCContentFilter) async {
+        let selection = makeSelection(from: filter)
+        pickedSelection = selection
+        pickedSourceName = sourceName(for: filter)
+        previewImage = nil
+        previewMessage = "Starting live preview…"
+        statusMessage = "Starting capture for \(pickedSourceName ?? "selected source")…"
 
-        if let selectedPickerSelection {
-            _ = reconcileSystemPickedSource(with: screenTargets, selection: selectedPickerSelection)
+        do {
+            try await screenCaptureManager.start(filter: filter)
+            permissionMessage = ""
+            refreshStatus()
+        } catch {
+            pickedSelection = nil
+            pickedSourceName = nil
+            previewMessage = "Couldn't start capture: \(error.localizedDescription)"
+            statusMessage = previewMessage
         }
-
-        screenCaptureAccessState = .granted
-        hasScreenRecordingPermission = true
-        screenCaptureDiagnostics = ""
-        permissionMessage = buildPermissionMessage()
-        updateStatusMessage()
-        updateStartDisabledReason()
-
-        Task {
-            await refreshPreview()
-        }
     }
 
-    private func clearSystemPickedSource() {
-        selectedPickerSelection = nil
-        selectedPickerSourceName = nil
-    }
-
-    @discardableResult
-    private func reconcileSystemPickedSource(
-        with targets: [ScreenTarget],
-        selection: ScreenCaptureSelection? = nil
-    ) -> Bool {
-        guard let selection = selection ?? selectedPickerSelection else { return false }
-        guard let matchedTarget = matchingTarget(for: selection, in: targets) else { return false }
-
-        selectedTargetID = matchedTarget.id
-        clearSystemPickedSource()
-        return true
-    }
-
-    private func selection(from filter: SCContentFilter) -> ScreenCaptureSelection {
+    private func makeSelection(from filter: SCContentFilter) -> ScreenCaptureSelection {
         let contentRect = filter.contentRect
         let scale = max(CGFloat(filter.pointPixelScale), 1)
         let sourceSize = CGSize(
@@ -861,17 +450,93 @@ final class RecordingManager: ObservableObject {
         }
     }
 
-    private func applyScreenCaptureFailure(_ error: Error, status: String) {
-        screenCaptureDiagnostics = describe(error)
+    // MARK: - Permissions
 
-        if isScreenCapturePermissionError(error) {
-            screenCaptureAccessState = .denied
-            hasScreenRecordingPermission = false
+    private var needsCameraPermission: Bool {
+        permissionsManager.permissionState(for: .video) != .authorized
+    }
+
+    private var needsMicrophonePermission: Bool {
+        permissionsManager.permissionState(for: .audio) != .authorized
+    }
+
+    private func ensureAVPermissions() async -> Bool {
+        switch await permissionsManager.ensureAVPermissions() {
+        case .granted:
+            permissionMessage = ""
+            return true
+        case .denied(let message):
+            permissionMessage = message
+            statusMessage = "Permission required."
+            return false
         }
+    }
 
-        permissionMessage = buildPermissionMessage()
-        statusMessage = status
-        updateStartDisabledReason()
+    // MARK: - Status / overlay helpers
+
+    private func refreshStatus() {
+        if isRecording {
+            statusMessage = "Recording…"
+        } else if !hasPickedSource {
+            statusMessage = "Click Choose Screen Source to begin."
+        } else if cameraDevices.isEmpty {
+            statusMessage = "No camera devices are currently available."
+        } else if microphoneDevices.isEmpty {
+            statusMessage = "No microphone devices are currently available."
+        } else if selectedCameraID == nil {
+            statusMessage = "Choose a camera to continue."
+        } else if selectedMicrophoneID == nil {
+            statusMessage = "Choose a microphone to continue."
+        } else {
+            statusMessage = "Ready."
+        }
+    }
+
+    private func syncPreviewOverlayLayout() {
+        var layout = overlayPanelManager.layoutStore.current()
+        layout.sizeFraction = webcamSizeFraction
+        overlayPanelManager.layoutStore.update(layout)
+    }
+
+    private func currentPreviewOverlayLayout() -> OverlayLayout {
+        syncPreviewOverlayLayout()
+        return overlayPanelManager.layoutStore.current()
+    }
+
+    // MARK: - Recording plumbing
+
+    private func startElapsedTimer() {
+        stopElapsedTimer()
+        recordingStartDate = Date()
+        elapsedTimeText = "00:00"
+
+        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let start = self.recordingStartDate else { return }
+                let interval = Int(Date().timeIntervalSince(start))
+                let minutes = interval / 60
+                let seconds = interval % 60
+                self.elapsedTimeText = String(format: "%02d:%02d", minutes, seconds)
+            }
+        }
+    }
+
+    private func stopElapsedTimer() {
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+        recordingStartDate = nil
+        elapsedTimeText = "00:00"
+    }
+
+    private func cleanupAfterFailure(_ error: Error) async {
+        screenCaptureManager.onRecordingSampleBuffer = nil
+        overlayPanelManager.hide()
+        cameraCaptureManager.onAudioSampleBuffer = nil
+        pipeline.cancel()
+        isRecording = false
+        stopElapsedTimer()
+        startCameraPreviewIfPossible()
+        statusMessage = error.localizedDescription
     }
 
     private func handlePipelineFailure(_ error: Error) async {
@@ -879,29 +544,31 @@ final class RecordingManager: ObservableObject {
         await cleanupAfterFailure(error)
     }
 
-    private func describe(_ error: Error) -> String {
-        let nsError = error as NSError
-        return "\(nsError.domain) (\(nsError.code)): \(nsError.localizedDescription)"
+    private func requestOutputURL() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [UTType.movie]
+            panel.canCreateDirectories = true
+            panel.nameFieldStringValue = "Recording-\(timestamp()).mov"
+            panel.prompt = "Record"
+            panel.begin { response in
+                if response == .OK, let url = panel.url {
+                    continuation.resume(returning: url)
+                } else {
+                    continuation.resume(throwing: RecorderError.saveCancelled)
+                }
+            }
+        }
     }
 
-    private func matchingTarget(for selection: ScreenCaptureSelection, in targets: [ScreenTarget]) -> ScreenTarget? {
-        let expectedKind: ScreenTarget.Kind?
-
-        switch selection.filter.style {
-        case .display:
-            expectedKind = .display
-        case .window:
-            expectedKind = .window
-        default:
-            expectedKind = nil
-        }
-
-        return targets.first { target in
-            guard let expectedKind else { return false }
-            return target.kind == expectedKind && target.frame.approximatelyEquals(to: selection.contentRect)
-        }
+    private func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
+        return formatter.string(from: .now)
     }
 }
+
+// MARK: - Recording pipeline (thread-safe writer wrapper)
 
 private final class RecordingPipeline: @unchecked Sendable {
     private let queue = DispatchQueue(label: "recorder.pipeline")
@@ -927,9 +594,7 @@ private final class RecordingPipeline: @unchecked Sendable {
     func appendScreen(_ sampleBuffer: CMSampleBuffer) {
         queue.async {
             guard self.terminalError == nil else { return }
-            guard let writer = self.writer, let screenPixelBuffer = sampleBuffer.imageBuffer else {
-                return
-            }
+            guard let writer = self.writer, let screenPixelBuffer = sampleBuffer.imageBuffer else { return }
 
             do {
                 try writer.appendVideo(
@@ -948,7 +613,6 @@ private final class RecordingPipeline: @unchecked Sendable {
     func appendAudio(_ sampleBuffer: CMSampleBuffer) {
         queue.async {
             guard self.terminalError == nil else { return }
-
             do {
                 try self.writer?.appendAudio(sampleBuffer)
             } catch {
@@ -1000,11 +664,7 @@ private final class RecordingPipeline: @unchecked Sendable {
     }
 }
 
-private extension String {
-    var nilIfEmpty: String? {
-        isEmpty ? nil : self
-    }
-}
+// MARK: - Helpers
 
 private extension CGRect {
     func approximatelyEquals(to other: CGRect, tolerance: CGFloat = 2) -> Bool {
@@ -1012,5 +672,11 @@ private extension CGRect {
             && abs(origin.y - other.origin.y) <= tolerance
             && abs(size.width - other.size.width) <= tolerance
             && abs(size.height - other.size.height) <= tolerance
+    }
+}
+
+private extension CMSampleBuffer {
+    var presentationTimeStamp: CMTime {
+        CMSampleBufferGetPresentationTimeStamp(self)
     }
 }

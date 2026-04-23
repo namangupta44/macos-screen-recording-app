@@ -13,11 +13,12 @@ enum CapturePermissionState {
     case denied
 }
 
+/// Handles **only** camera and microphone permissions. Screen-recording
+/// permission is handled entirely by `SCContentSharingPicker` — calling
+/// `CGPreflightScreenCaptureAccess()` or `SCShareableContent` anywhere in the
+/// app would re-fire the macOS TCC prompt even after the picker already
+/// granted access, so we intentionally stay away from both.
 struct PermissionsManager {
-    func hasScreenRecordingAccess() -> Bool {
-        CGPreflightScreenCaptureAccess()
-    }
-
     func permissionState(for mediaType: AVMediaType) -> CapturePermissionState {
         switch AVCaptureDevice.authorizationStatus(for: mediaType) {
         case .authorized:
@@ -34,34 +35,24 @@ struct PermissionsManager {
     func ensureAVPermissions() async -> PermissionCheckResult {
         let cameraGranted = await requestAVAccess(for: .video)
         guard cameraGranted else {
-            return .denied("Camera permission was denied. Grant access in System Settings > Privacy & Security > Camera.")
+            return .denied("Camera permission is required. Enable it in System Settings > Privacy & Security > Camera, then try again.")
         }
 
         let microphoneGranted = await requestAVAccess(for: .audio)
         guard microphoneGranted else {
-            return .denied("Microphone permission was denied. Grant access in System Settings > Privacy & Security > Microphone.")
+            return .denied("Microphone permission is required. Enable it in System Settings > Privacy & Security > Microphone, then try again.")
         }
 
         return .granted
     }
 
-    func openSystemSettings() {
-        if let securityPaneURL = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
-            NSWorkspace.shared.open(securityPaneURL)
+    func openPrivacySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
+            NSWorkspace.shared.open(url)
             return
         }
 
-        let systemSettingsURL = URL(fileURLWithPath: "/System/Applications/System Settings.app")
-        NSWorkspace.shared.open(systemSettingsURL)
-    }
-
-    func relaunchApplication() {
-        let configuration = NSWorkspace.OpenConfiguration()
-        let bundleURL = Bundle.main.bundleURL
-
-        NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { _, _ in
-            NSApp.terminate(nil)
-        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
 
     private func requestAVAccess(for mediaType: AVMediaType) async -> Bool {

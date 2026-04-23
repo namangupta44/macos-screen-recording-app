@@ -40,6 +40,23 @@ final class VideoCompositor {
         return context.createCGImage(finalImage, from: outputRect)
     }
 
+    func previewImage(
+        screenPixelBuffer: CVPixelBuffer,
+        cameraPixelBuffer: CVPixelBuffer?,
+        overlay: OverlayLayout,
+        outputSize: CGSize
+    ) -> CGImage? {
+        let outputRect = CGRect(origin: .zero, size: outputSize)
+        let finalImage = composedImage(
+            screenImage: CIImage(cvPixelBuffer: screenPixelBuffer),
+            cameraPixelBuffer: cameraPixelBuffer,
+            overlay: overlay,
+            outputRect: outputRect
+        )
+
+        return context.createCGImage(finalImage, from: outputRect)
+    }
+
     private func composedImage(
         screenImage: CIImage,
         cameraPixelBuffer: CVPixelBuffer?,
