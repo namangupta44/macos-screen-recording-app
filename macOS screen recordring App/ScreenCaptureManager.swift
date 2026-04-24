@@ -34,10 +34,10 @@ final class ScreenCaptureManager: NSObject {
     private var stream: SCStream?
     private var currentFilter: SCContentFilter?
 
-    func start(filter: SCContentFilter) async throws {
+    func start(filter: SCContentFilter, quality: ScreenRecordingQuality) async throws {
         await stop()
 
-        let outputSize = Self.outputSize(for: filter)
+        let outputSize = Self.outputSize(for: filter, quality: quality)
         let configuration = SCStreamConfiguration()
         configuration.width = Int(outputSize.width)
         configuration.height = Int(outputSize.height)
@@ -70,24 +70,15 @@ final class ScreenCaptureManager: NSObject {
         }
     }
 
-    private static func outputSize(for filter: SCContentFilter) -> CGSize {
+    private static func outputSize(for filter: SCContentFilter, quality: ScreenRecordingQuality) -> CGSize {
         let rect = filter.contentRect
         let scale = max(filter.pointPixelScale, 1)
-        let rawWidth = rect.width * CGFloat(scale)
-        let rawHeight = rect.height * CGFloat(scale)
-
-        // Cap at 1080p for reasonable perf; compositor will letterbox to a
-        // 1920x1080 recording canvas anyway.
-        let maxDimension: CGFloat = 1920
-        let longest = max(rawWidth, rawHeight, 1)
-        let factor = min(1, maxDimension / longest)
-        let width = max(2, (rawWidth * factor).rounded(.down))
-        let height = max(2, (rawHeight * factor).rounded(.down))
-
-        // `SCStreamConfiguration.width/height` must be even for h.264.
-        let evenWidth = Int(width) - (Int(width) % 2)
-        let evenHeight = Int(height) - (Int(height) % 2)
-        return CGSize(width: max(2, evenWidth), height: max(2, evenHeight))
+        return quality.outputSize(
+            for: CGSize(
+                width: rect.width * CGFloat(scale),
+                height: rect.height * CGFloat(scale)
+            )
+        )
     }
 }
 

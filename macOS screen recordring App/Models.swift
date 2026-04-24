@@ -7,6 +7,121 @@ struct CaptureDevice: Identifiable, Hashable {
     let name: String
 }
 
+enum ScreenRecordingQuality: String, CaseIterable, Identifiable {
+    case maximum
+    case high
+    case medium
+    case low
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .maximum:
+            return "Maximum"
+        case .high:
+            return "High"
+        case .medium:
+            return "Medium"
+        case .low:
+            return "Low"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .maximum:
+            return "Up to 4K source"
+        case .high:
+            return "Up to 1080p"
+        case .medium:
+            return "Up to 720p"
+        case .low:
+            return "Up to 480p"
+        }
+    }
+
+    var maximumDimension: CGFloat {
+        switch self {
+        case .maximum:
+            return 3840
+        case .high:
+            return 1920
+        case .medium:
+            return 1280
+        case .low:
+            return 854
+        }
+    }
+
+    func outputSize(for sourceSize: CGSize) -> CGSize {
+        Self.evenSizeFitting(sourceSize, maximumDimension: maximumDimension)
+    }
+
+    func videoBitRate(for outputSize: CGSize) -> Int {
+        let pixelRatio = max(CGFloat(1), (outputSize.width * outputSize.height) / CGFloat(1920 * 1080))
+
+        switch self {
+        case .maximum:
+            return min(80_000_000, max(20_000_000, Int(pixelRatio * 20_000_000)))
+        case .high:
+            return min(28_000_000, max(14_000_000, Int(pixelRatio * 14_000_000)))
+        case .medium:
+            return 8_000_000
+        case .low:
+            return 4_000_000
+        }
+    }
+
+    static func evenSizeFitting(_ sourceSize: CGSize, maximumDimension: CGFloat) -> CGSize {
+        let rawWidth = max(sourceSize.width, 2)
+        let rawHeight = max(sourceSize.height, 2)
+        let longest = max(rawWidth, rawHeight)
+        let factor = min(1, maximumDimension / longest)
+        let width = max(2, (rawWidth * factor).rounded(.down))
+        let height = max(2, (rawHeight * factor).rounded(.down))
+
+        let evenWidth = Int(width) - (Int(width) % 2)
+        let evenHeight = Int(height) - (Int(height) % 2)
+        return CGSize(width: max(2, evenWidth), height: max(2, evenHeight))
+    }
+}
+
+enum CameraRecordingQuality: String, CaseIterable, Identifiable {
+    case maximum
+    case high
+    case medium
+    case low
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .maximum:
+            return "Maximum"
+        case .high:
+            return "High"
+        case .medium:
+            return "Medium"
+        case .low:
+            return "Low"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .maximum:
+            return "Best available"
+        case .high:
+            return "1080p if available"
+        case .medium:
+            return "720p if available"
+        case .low:
+            return "Lower bandwidth"
+        }
+    }
+}
+
 struct ScreenCaptureSelection {
     let filter: SCContentFilter
     let contentRect: CGRect

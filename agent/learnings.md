@@ -70,3 +70,15 @@
 ## 2026-04-24 15:54 IST
 
 - `SCStream` preview callbacks can become sparse when the captured desktop is visually static, so live preview compositing must not depend on new screen frames alone. Keep the latest `CVPixelBuffer`, run a dedicated ~20fps render timer while preview is active, and render camera/cursor overlays from stores against that latest screen frame so the preview remains live even when nothing on the desktop changes.
+
+## 2026-04-24 16:07 IST
+
+- For startup permission UX, request camera and microphone through one AVFoundation flow before starting camera preview, and keep the screen source grant behind `SCContentSharingPicker`. This prompts the OS for camera/mic without reintroducing the Screen Recording TCC loops caused by preflight/shareable-content APIs.
+
+## 2026-04-24 16:10 IST
+
+- For default recording output, avoid `NSSavePanel` in `startRecording()`. Generate a unique `.mov` name inside the stored recording folder so Start Recording begins immediately; when the user changes that folder, persist a security-scoped folder bookmark and keep access open until the writer finishes or cancels.
+
+## 2026-04-24 16:13 IST
+
+- Recording quality should be applied consistently across the picker-backed `SCStream`, `RecordingPipeline` output size/bitrate, and `AVCaptureSession` camera preset. Keep the default at the maximum supported tier, and restart only the existing picker filter when screen quality changes so no `SCShareableContent` or preflight calls are reintroduced.

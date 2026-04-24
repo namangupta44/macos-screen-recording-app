@@ -7,7 +7,7 @@ enum PermissionCheckResult {
     case denied(String)
 }
 
-enum CapturePermissionState {
+enum CapturePermissionState: Equatable {
     case authorized
     case notDetermined
     case denied
@@ -34,16 +34,25 @@ struct PermissionsManager {
 
     func ensureAVPermissions() async -> PermissionCheckResult {
         let cameraGranted = await requestAVAccess(for: .video)
-        guard cameraGranted else {
-            return .denied("Camera permission is required. Enable it in System Settings > Privacy & Security > Camera, then try again.")
-        }
-
         let microphoneGranted = await requestAVAccess(for: .audio)
-        guard microphoneGranted else {
-            return .denied("Microphone permission is required. Enable it in System Settings > Privacy & Security > Microphone, then try again.")
+
+        if cameraGranted && microphoneGranted {
+            return .granted
         }
 
-        return .granted
+        var missingPermissions: [String] = []
+        if !cameraGranted {
+            missingPermissions.append("Camera")
+        }
+        if !microphoneGranted {
+            missingPermissions.append("Microphone")
+        }
+
+        if missingPermissions.count == 1, let missingPermission = missingPermissions.first {
+            return .denied("\(missingPermission) permission is required. Enable access in System Settings > Privacy & Security, then try again.")
+        }
+
+        return .denied("\(missingPermissions.joined(separator: " and ")) permissions are required. Enable access in System Settings > Privacy & Security, then try again.")
     }
 
     func openPrivacySettings() {

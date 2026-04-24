@@ -29,6 +29,12 @@ struct ContentView: View {
         .onChange(of: recordingManager.selectedMicrophoneID) { _, _ in
             recordingManager.selectedMicrophoneChanged()
         }
+        .onChange(of: recordingManager.screenRecordingQuality) { _, _ in
+            Task { await recordingManager.screenRecordingQualityChanged() }
+        }
+        .onChange(of: recordingManager.cameraRecordingQuality) { _, _ in
+            recordingManager.cameraRecordingQualityChanged()
+        }
         .onChange(of: recordingManager.webcamSizeFraction) { _, _ in
             recordingManager.webcamSizeChanged()
         }
@@ -67,18 +73,13 @@ struct ContentView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 14) {
                     sourceCard
+                    recordingFolderCard
+                    qualityCard
+                    permissionsCard
                     cameraCard
                     microphoneCard
                     webcamLookCard
                     cursorEffectsCard
-
-                    if recordingManager.needsAVPermissionsPrompt {
-                        permissionsCard
-                    }
-
-                    if !recordingManager.permissionMessage.isEmpty {
-                        permissionMessageBlock
-                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
@@ -162,6 +163,63 @@ struct ContentView: View {
         }
     }
 
+    private var recordingFolderCard: some View {
+        SettingsCard(
+            icon: "folder.fill",
+            iconTint: .green,
+            title: "Save Location"
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 13, weight: .semibold))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(recordingManager.recordingFolderName)
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(recordingManager.recordingFolderDisplayPath)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        Task { await recordingManager.chooseRecordingFolder() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "folder")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("Change")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(SidebarButtonStyle(tint: .green))
+                    .disabled(recordingManager.isRecording)
+
+                    Button {
+                        recordingManager.revealRecordingFolder()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("Reveal")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(SidebarButtonStyle(tint: .secondary))
+                }
+            }
+        }
+    }
+
     private var cameraCard: some View {
         SettingsCard(icon: "video.fill", iconTint: .purple, title: "Camera") {
             if recordingManager.cameraDevices.isEmpty {
@@ -177,6 +235,61 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity)
                 .disabled(recordingManager.isRecording)
             }
+        }
+    }
+
+    private var qualityCard: some View {
+        SettingsCard(icon: "slider.horizontal.3", iconTint: .green, title: "Quality") {
+            VStack(alignment: .leading, spacing: 12) {
+                qualityPickerRow(
+                    title: "Screen",
+                    detail: recordingManager.selectedScreenQualityDetail
+                ) {
+                    Picker("", selection: $recordingManager.screenRecordingQuality) {
+                        ForEach(ScreenRecordingQuality.allCases) { quality in
+                            Text("\(quality.title) · \(quality.detail)").tag(quality)
+                        }
+                    }
+                }
+
+                Divider()
+
+                qualityPickerRow(
+                    title: "Camera",
+                    detail: recordingManager.selectedCameraQualityDetail
+                ) {
+                    Picker("", selection: $recordingManager.cameraRecordingQuality) {
+                        ForEach(CameraRecordingQuality.allCases) { quality in
+                            Text("\(quality.title) · \(quality.detail)").tag(quality)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func qualityPickerRow<PickerContent: View>(
+        title: String,
+        detail: String,
+        @ViewBuilder picker: () -> PickerContent
+    ) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            picker()
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 128)
+                .disabled(recordingManager.isRecording)
         }
     }
 
@@ -348,52 +461,160 @@ struct ContentView: View {
     }
 
     private var permissionsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "lock.shield.fill")
-                    .foregroundStyle(.yellow)
-                    .font(.system(size: 13, weight: .semibold))
-                Text("Permissions")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-            }
+        SettingsCard(
+            icon: "lock.shield.fill",
+            iconTint: recordingManager.hasMissingSetupPermission ? .yellow : .green,
+            title: "Permissions"
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                permissionStatusRow(
+                    title: "Screen Source",
+                    detail: recordingManager.hasPickedSource ? (recordingManager.pickedSourceName ?? "Selected") : "Not selected",
+                    systemImage: "rectangle.on.rectangle",
+                    state: recordingManager.hasPickedSource ? .authorized : .notDetermined
+                )
 
-            Text("Camera and microphone access is required to record.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                permissionStatusRow(
+                    title: "Camera",
+                    detail: permissionDetail(for: recordingManager.cameraPermissionState),
+                    systemImage: "video.fill",
+                    state: recordingManager.cameraPermissionState
+                )
 
-            Button {
-                Task { await recordingManager.requestAVPermissions() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.shield.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("Grant Access")
-                        .font(.system(size: 12, weight: .medium))
+                permissionStatusRow(
+                    title: "Microphone",
+                    detail: permissionDetail(for: recordingManager.microphonePermissionState),
+                    systemImage: "mic.fill",
+                    state: recordingManager.microphonePermissionState
+                )
+
+                if !recordingManager.permissionMessage.isEmpty {
+                    Text(recordingManager.permissionMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
                 }
-                .frame(maxWidth: .infinity)
+
+                if recordingManager.hasMissingSetupPermission {
+                    Button {
+                        Task { await recordingManager.requestMissingPermissions() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: permissionActionIcon)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(permissionActionTitle)
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(SidebarButtonStyle(tint: .yellow))
+                    .disabled(recordingManager.isRecording)
+                }
             }
-            .buttonStyle(SidebarButtonStyle(tint: .yellow))
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.yellow.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.yellow.opacity(0.35), lineWidth: 0.5)
-        )
     }
 
-    private var permissionMessageBlock: some View {
-        Text(recordingManager.permissionMessage)
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 4)
+    private var permissionActionTitle: String {
+        if hasDeniedAVPermission {
+            return "Open Privacy Settings"
+        }
+        if recordingManager.cameraPermissionState != .authorized || recordingManager.microphonePermissionState != .authorized {
+            return "Allow Missing Permissions"
+        }
+        return "Choose Screen Source"
+    }
+
+    private var permissionActionIcon: String {
+        if hasDeniedAVPermission {
+            return "gearshape.fill"
+        }
+        if recordingManager.cameraPermissionState != .authorized || recordingManager.microphonePermissionState != .authorized {
+            return "checkmark.shield.fill"
+        }
+        return "rectangle.on.rectangle"
+    }
+
+    private var hasDeniedAVPermission: Bool {
+        recordingManager.cameraPermissionState == .denied || recordingManager.microphonePermissionState == .denied
+    }
+
+    private func permissionDetail(for state: CapturePermissionState) -> String {
+        switch state {
+        case .authorized:
+            return "Allowed"
+        case .notDetermined:
+            return "Not allowed yet"
+        case .denied:
+            return "Blocked"
+        }
+    }
+
+    private func permissionStatusRow(
+        title: String,
+        detail: String,
+        systemImage: String,
+        state: CapturePermissionState
+    ) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            Label(permissionStateLabel(for: state), systemImage: permissionStateIcon(for: state))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(permissionStateColor(for: state))
+                .labelStyle(.iconOnly)
+                .frame(width: 18, height: 18)
+                .help(permissionStateLabel(for: state))
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func permissionStateLabel(for state: CapturePermissionState) -> String {
+        switch state {
+        case .authorized:
+            return "Allowed"
+        case .notDetermined:
+            return "Required"
+        case .denied:
+            return "Blocked"
+        }
+    }
+
+    private func permissionStateIcon(for state: CapturePermissionState) -> String {
+        switch state {
+        case .authorized:
+            return "checkmark.circle.fill"
+        case .notDetermined:
+            return "exclamationmark.circle.fill"
+        case .denied:
+            return "xmark.circle.fill"
+        }
+    }
+
+    private func permissionStateColor(for state: CapturePermissionState) -> Color {
+        switch state {
+        case .authorized:
+            return .green
+        case .notDetermined:
+            return .yellow
+        case .denied:
+            return .red
+        }
     }
 
     private func emptyRow(text: String) -> some View {

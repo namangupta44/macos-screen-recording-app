@@ -4,7 +4,6 @@ import Combine
 import CoreMedia
 import CoreVideo
 @preconcurrency import ScreenCaptureKit
-import UniformTypeIdentifiers
 
 enum RecorderError: LocalizedError {
     case sourceNotSelected
@@ -48,6 +47,8 @@ final class RecordingManager: ObservableObject {
     @Published var microphoneDevices: [CaptureDevice] = []
     @Published var selectedCameraID: String?
     @Published var selectedMicrophoneID: String?
+    @Published var screenRecordingQuality: ScreenRecordingQuality = .maximum
+    @Published var cameraRecordingQuality: CameraRecordingQuality = .maximum
     @Published var webcamSizeFraction: Double
     @Published var webcamShape: OverlayShape = .circle
     @Published var webcamBorderStyle: OverlayBorderStyle = .soft
@@ -63,6 +64,7 @@ final class RecordingManager: ObservableObject {
     @Published var statusMessage = "Click Choose Screen Source to begin."
     @Published var permissionMessage = ""
     @Published var lastOutputPath = ""
+    @Published var recordingFolderPath = ""
 
     @Published var previewImage: NSImage?
     @Published var previewMessage = "Click Choose Screen Source to see a live preview."
@@ -72,26 +74,43 @@ final class RecordingManager: ObservableObject {
     var webcamSizeLabel: String { "\(Int(webcamSizeFraction * 100))%" }
     var cursorScaleLabel: String { "\(Int(cursorScale * 100))%" }
     var cursorZoomScaleLabel: String { String(format: "%.1fx", cursorZoomScale) }
+    var selectedScreenQualityDetail: String { screenRecordingQuality.detail }
+    var selectedCameraQualityDetail: String { cameraRecordingQuality.detail }
     var canPositionWebcamInPreview: Bool { previewImage != nil && selectedCameraID != nil }
 
     var hasPickedSource: Bool { pickedSelection != nil }
 
     var canStartRecording: Bool {
-        !isRecording && hasPickedSource && selectedCameraID != nil && selectedMicrophoneID != nil
+        !isRecording &&
+        hasPickedSource &&
+        selectedCameraID != nil &&
+        selectedMicrophoneID != nil &&
+        !needsCameraPermission &&
+        !needsMicrophonePermission
     }
 
     var canRevealLastRecording: Bool { !lastOutputPath.isEmpty }
+    var recordingFolderName: String {
+        let url = URL(fileURLWithPath: recordingFolderPath)
+        let name = url.lastPathComponent
+        return name.isEmpty ? url.path : name
+    }
+    var recordingFolderDisplayPath: String {
+        (recordingFolderPath as NSString).abbreviatingWithTildeInPath
+    }
 
     var startDisabledReason: String {
+        if needsCameraPermission { return "Allow camera access to continue." }
+        if needsMicrophonePermission { return "Allow microphone access to continue." }
         if !hasPickedSource { return "Click Choose Screen Source to pick a display or window." }
         if selectedCameraID == nil { return "Choose a camera to continue." }
         if selectedMicrophoneID == nil { return "Choose a microphone to continue." }
         return ""
     }
 
-    var needsAVPermissionsPrompt: Bool {
-        !isRecording && (needsCameraPermission || needsMicrophonePermission)
-    }
+    var cameraPermissionState: CapturePermissionState { permissionsManager.permissionState(for: .video) }
+    var microphonePermissionState: CapturePermissionState { permissionsManager.permissionState(for: .audio) }
+    var hasMissingSetupPermission: Bool { !hasPickedSource || needsCameraPermission || needsMicrophonePermission }
 
     // MARK: - Collaborators
     private let defaults = UserDefaults.standard
@@ -137,12 +156,24 @@ final class RecordingManager: ObservableObject {
     private var pickedSelection: ScreenCaptureSelection?
     private var elapsedTimer: Timer?
     private var recordingStartDate: Date?
+    private var didRequestInitialAVPermissions = false
+    private var activeRecordingFolderAccessURL: URL?
     private let previewCanvasSize = CGSize(width: 1280, height: 720)
-    private let recordingCanvasSize = CGSize(width: 1920, height: 1080)
+    private static let recordingFolderPathKey = "recording.folder.path"
+    private static let recordingFolderBookmarkKey = "recording.folder.bookmark"
+    private static let screenRecordingQualityKey = "recording.screen.quality"
+    private static let cameraRecordingQualityKey = "recording.camera.quality"
+    private static let defaultRecordingFolderURL = FileManager.default.urls(
+        for: .documentDirectory,
+        in: .userDomainMask
+    ).first ?? FileManager.default.homeDirectoryForCurrentUser
 
     // MARK: - Lifecycle
 
     init() {
+        recordingFolderPath = Self.resolvedRecordingFolderURL(defaults: defaults).path
+        screenRecordingQuality = Self.savedScreenRecordingQuality(defaults: defaults)
+        cameraRecordingQuality = Self.savedCameraRecordingQuality(defaults: defaults)
         let savedSize = CGFloat(defaults.object(forKey: "overlay.sizeFraction") as? Double ?? 0.18)
         webcamSizeFraction = Double(OverlayPanelManager.clampedSizeFraction(savedSize))
         cursorScale = Double(Self.clampedCursorScale(CGFloat(defaults.object(forKey: "cursor.scale") as? Double ?? 1.5)))
@@ -161,6 +192,7 @@ final class RecordingManager: ObservableObject {
     }
 
     func prepare() async {
+        await requestInitialAVPermissionsIfNeeded()
         reloadDevices()
         startCameraPreviewIfPossible()
         refreshStatus()
@@ -209,6 +241,35 @@ final class RecordingManager: ObservableObject {
     func selectedMicrophoneChanged() {
         defaults.set(selectedMicrophoneID, forKey: "selected.microphone")
         refreshStatus()
+    }
+
+    func screenRecordingQualityChanged() async {
+        defaults.set(screenRecordingQuality.rawValue, forKey: Self.screenRecordingQualityKey)
+        guard !isRecording, let filter = pickedSelection?.filter else { return }
+
+        previewImage = nil
+        previewRenderer.reset()
+        previewMessage = "Updating preview quality…"
+        statusMessage = "Updating capture quality…"
+
+        do {
+            try await screenCaptureManager.start(filter: filter, quality: screenRecordingQuality)
+            if let pickedSelection {
+                startCursorTracking(for: pickedSelection)
+            }
+            refreshStatus()
+        } catch {
+            pickedSelection = nil
+            pickedSourceName = nil
+            cursorTrackingManager.stop()
+            previewMessage = "Couldn't update capture quality: \(error.localizedDescription)"
+            statusMessage = previewMessage
+        }
+    }
+
+    func cameraRecordingQualityChanged() {
+        defaults.set(cameraRecordingQuality.rawValue, forKey: Self.cameraRecordingQualityKey)
+        startCameraPreviewIfPossible()
     }
 
     func webcamSizeChanged() {
@@ -298,6 +359,23 @@ final class RecordingManager: ObservableObject {
         }
     }
 
+    func requestMissingPermissions() async {
+        guard !isRecording else { return }
+
+        if needsCameraPermission || needsMicrophonePermission {
+            await requestAVPermissions()
+
+            if cameraPermissionState == .denied || microphonePermissionState == .denied {
+                openPrivacySettings()
+                return
+            }
+        }
+
+        if !needsCameraPermission && !needsMicrophonePermission && !hasPickedSource {
+            presentScreenSourcePicker()
+        }
+    }
+
     func openPrivacySettings() {
         permissionsManager.openPrivacySettings()
     }
@@ -305,6 +383,31 @@ final class RecordingManager: ObservableObject {
     func revealLastRecording() {
         guard canRevealLastRecording else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: lastOutputPath)])
+    }
+
+    func chooseRecordingFolder() async {
+        guard !isRecording else { return }
+
+        do {
+            guard let folderURL = try await requestRecordingFolderURL() else {
+                refreshStatus()
+                return
+            }
+
+            try saveRecordingFolder(folderURL)
+            statusMessage = "Recordings will save to \(recordingFolderName)."
+        } catch {
+            statusMessage = "Couldn't change save location: \(error.localizedDescription)"
+        }
+    }
+
+    func revealRecordingFolder() {
+        let folderURL = resolvedRecordingFolderURL()
+        let didStartAccessing = startAccessingRecordingFolderIfNeeded(folderURL)
+        NSWorkspace.shared.activateFileViewerSelecting([folderURL])
+        if didStartAccessing {
+            folderURL.stopAccessingSecurityScopedResource()
+        }
     }
 
     func startRecording() async {
@@ -327,10 +430,7 @@ final class RecordingManager: ObservableObject {
 
         let outputURL: URL
         do {
-            outputURL = try await requestOutputURL()
-        } catch RecorderError.saveCancelled {
-            statusMessage = "Ready."
-            return
+            outputURL = try prepareOutputURL()
         } catch {
             statusMessage = error.localizedDescription
             return
@@ -339,13 +439,19 @@ final class RecordingManager: ObservableObject {
         do {
             try cameraCaptureManager.configure(
                 videoDeviceID: selectedCameraID,
-                audioDeviceID: selectedMicrophoneID
+                audioDeviceID: selectedMicrophoneID,
+                cameraQuality: cameraRecordingQuality
             )
             cameraCaptureManager.onAudioSampleBuffer = { [weak self] sampleBuffer in
                 self?.pipeline.appendAudio(sampleBuffer)
             }
 
-            try pipeline.start(outputURL: outputURL, outputSize: recordingCanvasSize)
+            let outputSize = screenRecordingQuality.outputSize(for: pickedSelection.sourceSize)
+            try pipeline.start(
+                outputURL: outputURL,
+                outputSize: outputSize,
+                videoBitRate: screenRecordingQuality.videoBitRate(for: outputSize)
+            )
             startCursorTracking(for: pickedSelection)
 
             screenCaptureManager.onRecordingSampleBuffer = { [weak self] sampleBuffer in
@@ -387,6 +493,8 @@ final class RecordingManager: ObservableObject {
             statusMessage = error.localizedDescription
         }
 
+        stopAccessingActiveRecordingFolder()
+
         // Drop the microphone input so we don't keep it hot between takes.
         startCameraPreviewIfPossible()
         refreshStatus()
@@ -411,7 +519,7 @@ final class RecordingManager: ObservableObject {
             return
         }
 
-        guard permissionsManager.permissionState(for: .video) != .denied else {
+        guard permissionsManager.permissionState(for: .video) == .authorized else {
             cameraCaptureManager.stopRunning()
             return
         }
@@ -420,7 +528,11 @@ final class RecordingManager: ObservableObject {
             // Pass nil audio during preview — we only attach the mic when we
             // actually start recording, so the user isn't holding the mic
             // open while they compose.
-            try cameraCaptureManager.configure(videoDeviceID: selectedCameraID, audioDeviceID: nil)
+            try cameraCaptureManager.configure(
+                videoDeviceID: selectedCameraID,
+                audioDeviceID: nil,
+                cameraQuality: cameraRecordingQuality
+            )
             cameraCaptureManager.startRunning()
         } catch {
         }
@@ -460,6 +572,7 @@ final class RecordingManager: ObservableObject {
             cameraCaptureManager.onAudioSampleBuffer = nil
             screenCaptureManager.onRecordingSampleBuffer = nil
             cursorTrackingManager.stop()
+            stopAccessingActiveRecordingFolder()
         }
 
         previewMessage = "The selected source stopped. Click Choose Screen Source to pick another."
@@ -494,7 +607,7 @@ final class RecordingManager: ObservableObject {
         statusMessage = "Starting capture for \(pickedSourceName ?? "selected source")…"
 
         do {
-            try await screenCaptureManager.start(filter: filter)
+            try await screenCaptureManager.start(filter: filter, quality: screenRecordingQuality)
             startCursorTracking(for: selection)
             permissionMessage = ""
             refreshStatus()
@@ -544,6 +657,14 @@ final class RecordingManager: ObservableObject {
 
     // MARK: - Permissions
 
+    private func requestInitialAVPermissionsIfNeeded() async {
+        guard !didRequestInitialAVPermissions else { return }
+        didRequestInitialAVPermissions = true
+
+        guard needsCameraPermission || needsMicrophonePermission else { return }
+        await requestAVPermissions()
+    }
+
     private var needsCameraPermission: Bool {
         permissionsManager.permissionState(for: .video) != .authorized
     }
@@ -583,6 +704,10 @@ final class RecordingManager: ObservableObject {
     private func refreshStatus() {
         if isRecording {
             statusMessage = "Recording…"
+        } else if needsCameraPermission {
+            statusMessage = "Camera permission required."
+        } else if needsMicrophonePermission {
+            statusMessage = "Microphone permission required."
         } else if !hasPickedSource {
             statusMessage = "Click Choose Screen Source to begin."
         } else if cameraDevices.isEmpty {
@@ -670,6 +795,7 @@ final class RecordingManager: ObservableObject {
         pipeline.cancel()
         isRecording = false
         stopElapsedTimer()
+        stopAccessingActiveRecordingFolder()
         startCameraPreviewIfPossible()
         statusMessage = error.localizedDescription
     }
@@ -679,21 +805,130 @@ final class RecordingManager: ObservableObject {
         await cleanupAfterFailure(error)
     }
 
-    private func requestOutputURL() async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
-            let panel = NSSavePanel()
-            panel.allowedContentTypes = [UTType.movie]
+    private func requestRecordingFolderURL() async throws -> URL? {
+        await withCheckedContinuation { continuation in
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
             panel.canCreateDirectories = true
-            panel.nameFieldStringValue = "Recording-\(timestamp()).mov"
-            panel.prompt = "Record"
+            panel.allowsMultipleSelection = false
+            panel.directoryURL = resolvedRecordingFolderURL()
+            panel.prompt = "Use Folder"
             panel.begin { response in
-                if response == .OK, let url = panel.url {
-                    continuation.resume(returning: url)
-                } else {
-                    continuation.resume(throwing: RecorderError.saveCancelled)
-                }
+                continuation.resume(returning: response == .OK ? panel.url : nil)
             }
         }
+    }
+
+    private func saveRecordingFolder(_ folderURL: URL) throws {
+        let bookmark = try folderURL.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+
+        defaults.set(bookmark, forKey: Self.recordingFolderBookmarkKey)
+        defaults.set(folderURL.path, forKey: Self.recordingFolderPathKey)
+        recordingFolderPath = folderURL.path
+    }
+
+    private func prepareOutputURL() throws -> URL {
+        stopAccessingActiveRecordingFolder()
+
+        let folderURL = resolvedRecordingFolderURL()
+        let didStartAccessing = startAccessingRecordingFolderIfNeeded(folderURL)
+        if didStartAccessing {
+            activeRecordingFolderAccessURL = folderURL
+        }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: folderURL,
+                withIntermediateDirectories: true
+            )
+            return uniqueRecordingURL(in: folderURL)
+        } catch {
+            if didStartAccessing {
+                stopAccessingActiveRecordingFolder()
+            }
+            throw error
+        }
+    }
+
+    private func uniqueRecordingURL(in folderURL: URL) -> URL {
+        let baseName = "Recording-\(timestamp())"
+        var candidate = folderURL.appendingPathComponent("\(baseName).mov")
+        var suffix = 2
+
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = folderURL.appendingPathComponent("\(baseName)-\(suffix).mov")
+            suffix += 1
+        }
+
+        return candidate
+    }
+
+    private func resolvedRecordingFolderURL() -> URL {
+        let url = Self.resolvedRecordingFolderURL(defaults: defaults)
+        if recordingFolderPath != url.path {
+            recordingFolderPath = url.path
+        }
+        return url
+    }
+
+    private static func resolvedRecordingFolderURL(defaults: UserDefaults) -> URL {
+        if let bookmark = defaults.data(forKey: recordingFolderBookmarkKey) {
+            do {
+                var isStale = false
+                let url = try URL(
+                    resolvingBookmarkData: bookmark,
+                    options: [.withSecurityScope],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
+                return url
+            } catch {
+                defaults.removeObject(forKey: recordingFolderBookmarkKey)
+            }
+        }
+
+        if let storedPath = defaults.string(forKey: recordingFolderPathKey), !storedPath.isEmpty {
+            return URL(fileURLWithPath: storedPath, isDirectory: true)
+        }
+
+        return defaultRecordingFolderURL
+    }
+
+    private static func savedScreenRecordingQuality(defaults: UserDefaults) -> ScreenRecordingQuality {
+        guard
+            let rawValue = defaults.string(forKey: screenRecordingQualityKey),
+            let quality = ScreenRecordingQuality(rawValue: rawValue)
+        else {
+            return .maximum
+        }
+
+        return quality
+    }
+
+    private static func savedCameraRecordingQuality(defaults: UserDefaults) -> CameraRecordingQuality {
+        guard
+            let rawValue = defaults.string(forKey: cameraRecordingQualityKey),
+            let quality = CameraRecordingQuality(rawValue: rawValue)
+        else {
+            return .maximum
+        }
+
+        return quality
+    }
+
+    private func startAccessingRecordingFolderIfNeeded(_ folderURL: URL) -> Bool {
+        guard defaults.data(forKey: Self.recordingFolderBookmarkKey) != nil else { return false }
+        return folderURL.startAccessingSecurityScopedResource()
+    }
+
+    private func stopAccessingActiveRecordingFolder() {
+        activeRecordingFolderAccessURL?.stopAccessingSecurityScopedResource()
+        activeRecordingFolderAccessURL = nil
     }
 
     private func timestamp() -> String {
@@ -838,9 +1073,13 @@ private final class RecordingPipeline: @unchecked Sendable {
         self.cursorStateStore = cursorStateStore
     }
 
-    func start(outputURL: URL, outputSize: CGSize) throws {
+    func start(outputURL: URL, outputSize: CGSize, videoBitRate: Int) throws {
         terminalError = nil
-        writer = try AssetWriterManager(outputURL: outputURL, outputSize: outputSize)
+        writer = try AssetWriterManager(
+            outputURL: outputURL,
+            outputSize: outputSize,
+            videoBitRate: videoBitRate
+        )
     }
 
     func appendScreen(_ sampleBuffer: CMSampleBuffer) {

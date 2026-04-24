@@ -14,7 +14,7 @@ final class AssetWriterManager {
     private var appendedVideoFrameCount = 0
     private var primedAudioFormat: CMFormatDescription?
 
-    init(outputURL: URL, outputSize: CGSize) throws {
+    init(outputURL: URL, outputSize: CGSize, videoBitRate: Int) throws {
         self.outputURL = outputURL
         self.outputSize = outputSize
 
@@ -27,7 +27,7 @@ final class AssetWriterManager {
                 AVVideoWidthKey: outputSize.width,
                 AVVideoHeightKey: outputSize.height,
                 AVVideoCompressionPropertiesKey: [
-                    AVVideoAverageBitRateKey: 10_000_000,
+                    AVVideoAverageBitRateKey: videoBitRate,
                     AVVideoExpectedSourceFrameRateKey: 30,
                     AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
                 ]

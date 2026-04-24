@@ -65,7 +65,11 @@ final class CameraCaptureManager: NSObject {
         session.commitConfiguration()
     }
 
-    func configure(videoDeviceID: String?, audioDeviceID: String?) throws {
+    func configure(
+        videoDeviceID: String?,
+        audioDeviceID: String?,
+        cameraQuality: CameraRecordingQuality
+    ) throws {
         try sessionQueue.sync {
             session.beginConfiguration()
             defer { session.commitConfiguration() }
@@ -102,6 +106,8 @@ final class CameraCaptureManager: NSObject {
                 session.addInput(input)
                 currentAudioInput = input
             }
+
+            applyBestAvailablePreset(for: cameraQuality)
         }
     }
 
@@ -120,6 +126,14 @@ final class CameraCaptureManager: NSObject {
             }
         }
     }
+
+    private func applyBestAvailablePreset(for cameraQuality: CameraRecordingQuality) {
+        guard let preset = cameraQuality.sessionPresetCandidates.first(where: { session.canSetSessionPreset($0) }) else {
+            return
+        }
+
+        session.sessionPreset = preset
+    }
 }
 
 extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
@@ -128,6 +142,21 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AV
             onVideoFrame?(pixelBuffer, sampleBuffer.presentationTimeStamp)
         } else if output === audioOutput {
             onAudioSampleBuffer?(sampleBuffer)
+        }
+    }
+}
+
+private extension CameraRecordingQuality {
+    var sessionPresetCandidates: [AVCaptureSession.Preset] {
+        switch self {
+        case .maximum:
+            return [.hd4K3840x2160, .hd1920x1080, .hd1280x720, .high]
+        case .high:
+            return [.hd1920x1080, .hd1280x720, .high]
+        case .medium:
+            return [.hd1280x720, .medium, .low]
+        case .low:
+            return [.low, .medium]
         }
     }
 }
