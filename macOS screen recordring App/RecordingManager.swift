@@ -717,9 +717,8 @@ private final class PreviewRenderPipeline: @unchecked Sendable {
 
     var onImage: ((CGImage) -> Void)?
 
-    private var pendingPixelBuffer: CVPixelBuffer?
-    private var isRenderScheduled = false
-    private var lastRenderDate = Date.distantPast
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var renderTimer: DispatchSourceTimer?
     private var generation = 0
 
     init(
@@ -735,47 +734,61 @@ private final class PreviewRenderPipeline: @unchecked Sendable {
     }
 
     func enqueue(_ pixelBuffer: CVPixelBuffer) {
-        let shouldSchedule: Bool
+        let shouldStartTimer: Bool
 
         lock.lock()
-        pendingPixelBuffer = pixelBuffer
-        shouldSchedule = !isRenderScheduled && Date().timeIntervalSince(lastRenderDate) >= throttleInterval
-        if shouldSchedule {
-            isRenderScheduled = true
-        }
+        latestPixelBuffer = pixelBuffer
+        shouldStartTimer = renderTimer == nil
         lock.unlock()
 
-        if shouldSchedule {
+        if shouldStartTimer {
             queue.async { [weak self] in
-                self?.renderLatest()
+                self?.startTimerIfNeeded()
             }
         }
     }
 
     func reset() {
+        let timer: DispatchSourceTimer?
+
         lock.lock()
-        pendingPixelBuffer = nil
-        isRenderScheduled = false
-        lastRenderDate = .distantPast
+        latestPixelBuffer = nil
+        timer = renderTimer
+        renderTimer = nil
         generation += 1
         lock.unlock()
+
+        timer?.cancel()
     }
 
-    private func renderLatest() {
+    private func startTimerIfNeeded() {
+        lock.lock()
+        guard renderTimer == nil else {
+            lock.unlock()
+            return
+        }
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: throttleInterval, leeway: .milliseconds(8))
+        renderTimer = timer
+        lock.unlock()
+
+        timer.setEventHandler { [weak self] in
+            self?.renderLatestFrame()
+        }
+        timer.resume()
+    }
+
+    private func renderLatestFrame() {
         let pixelBuffer: CVPixelBuffer?
         let renderGeneration: Int
 
         lock.lock()
-        pixelBuffer = pendingPixelBuffer
-        pendingPixelBuffer = nil
-        lastRenderDate = Date()
+        pixelBuffer = latestPixelBuffer
         renderGeneration = generation
         lock.unlock()
 
-        guard let pixelBuffer else {
-            markRenderFinishedAndScheduleIfNeeded()
-            return
-        }
+        guard let pixelBuffer else { return }
 
         let image = compositor.previewImage(
             screenPixelBuffer: pixelBuffer,
@@ -789,26 +802,6 @@ private final class PreviewRenderPipeline: @unchecked Sendable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isCurrentGeneration(renderGeneration) else { return }
                 self.onImage?(image)
-            }
-        }
-
-        markRenderFinishedAndScheduleIfNeeded()
-    }
-
-    private func markRenderFinishedAndScheduleIfNeeded() {
-        let shouldSchedule: Bool
-
-        lock.lock()
-        isRenderScheduled = false
-        shouldSchedule = pendingPixelBuffer != nil && Date().timeIntervalSince(lastRenderDate) >= throttleInterval
-        if shouldSchedule {
-            isRenderScheduled = true
-        }
-        lock.unlock()
-
-        if shouldSchedule {
-            queue.async { [weak self] in
-                self?.renderLatest()
             }
         }
     }

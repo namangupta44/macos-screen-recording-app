@@ -66,3 +66,7 @@
 ## 2026-04-24 15:44 IST
 
 - The app target already points `ASSETCATALOG_COMPILER_APPICON_NAME` at `AppIcon`, so Dock/App Switcher icon fixes should populate `Assets.xcassets/AppIcon.appiconset` with actual PNG files and `filename` entries in `Contents.json`; no Swift runtime icon code is needed.
+
+## 2026-04-24 15:54 IST
+
+- `SCStream` preview callbacks can become sparse when the captured desktop is visually static, so live preview compositing must not depend on new screen frames alone. Keep the latest `CVPixelBuffer`, run a dedicated ~20fps render timer while preview is active, and render camera/cursor overlays from stores against that latest screen frame so the preview remains live even when nothing on the desktop changes.
