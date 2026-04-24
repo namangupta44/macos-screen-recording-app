@@ -82,3 +82,7 @@
 ## 2026-04-24 16:13 IST
 
 - Recording quality should be applied consistently across the picker-backed `SCStream`, `RecordingPipeline` output size/bitrate, and `AVCaptureSession` camera preset. Keep the default at the maximum supported tier, and restart only the existing picker filter when screen quality changes so no `SCShareableContent` or preflight calls are reintroduced.
+
+## 2026-04-24 16:25 IST
+
+- Click rings must store their own normalized click location at mouse-down time instead of reusing the live cursor location each frame. Otherwise the pulse appears to drag with the cursor after a click; `VideoCompositor` should map the saved click point into the fitted or zoomed output before drawing the ring.

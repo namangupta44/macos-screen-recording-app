@@ -74,13 +74,21 @@ final class VideoCompositor {
         var finalImage = fittedScreen.image
 
         var cursorPoint = cursor.map { point(for: $0, in: fittedScreen.contentFrame) }
+        var zoomTransform: CursorZoomTransform?
         if let cursor, let point = cursorPoint, cursor.settings.isZoomEnabled {
             let zoomed = zoomedImage(finalImage, around: point, settings: cursor.settings, outputRect: outputRect)
             finalImage = zoomed.image
-            cursorPoint = zoomed.cursorPoint
+            cursorPoint = zoomed.transform.point(for: point)
+            zoomTransform = zoomed.transform
         }
 
-        if let cursor, let point = cursorPoint, let cursorImage = makeCursorEffectsImage(cursor: cursor, at: point, outputRect: outputRect) {
+        if let cursor, let point = cursorPoint, let cursorImage = makeCursorEffectsImage(
+            cursor: cursor,
+            at: point,
+            contentFrame: fittedScreen.contentFrame,
+            zoomTransform: zoomTransform,
+            outputRect: outputRect
+        ) {
             finalImage = cursorImage.composited(over: finalImage)
         }
 
@@ -106,9 +114,13 @@ final class VideoCompositor {
     }
 
     private func point(for cursor: CursorFrameState, in contentFrame: CGRect) -> CGPoint {
+        point(for: cursor.normalizedLocation, in: contentFrame)
+    }
+
+    private func point(for normalizedLocation: CGPoint, in contentFrame: CGRect) -> CGPoint {
         CGPoint(
-            x: contentFrame.minX + (contentFrame.width * cursor.normalizedLocation.x),
-            y: contentFrame.minY + (contentFrame.height * cursor.normalizedLocation.y)
+            x: contentFrame.minX + (contentFrame.width * normalizedLocation.x),
+            y: contentFrame.minY + (contentFrame.height * normalizedLocation.y)
         )
     }
 
@@ -117,9 +129,11 @@ final class VideoCompositor {
         around cursorPoint: CGPoint,
         settings: CursorEffectSettings,
         outputRect: CGRect
-    ) -> (image: CIImage, cursorPoint: CGPoint) {
+    ) -> (image: CIImage, transform: CursorZoomTransform) {
         let scale = settings.zoomScale.clamped(to: CursorEffectSettings.zoomScaleRange)
-        guard scale > 1.01 else { return (image, cursorPoint) }
+        guard scale > 1.01 else {
+            return (image, CursorZoomTransform(cropRect: outputRect, scale: 1))
+        }
 
         let cropSize = CGSize(width: outputRect.width / scale, height: outputRect.height / scale)
         let cropOrigin = CGPoint(
@@ -133,15 +147,17 @@ final class VideoCompositor {
             .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             .cropped(to: outputRect)
             .composited(over: CIImage(color: .black).cropped(to: outputRect))
-        let adjustedCursorPoint = CGPoint(
-            x: (cursorPoint.x - cropRect.minX) * scale,
-            y: (cursorPoint.y - cropRect.minY) * scale
-        )
 
-        return (zoomed, adjustedCursorPoint)
+        return (zoomed, CursorZoomTransform(cropRect: cropRect, scale: scale))
     }
 
-    private func makeCursorEffectsImage(cursor: CursorFrameState, at point: CGPoint, outputRect: CGRect) -> CIImage? {
+    private func makeCursorEffectsImage(
+        cursor: CursorFrameState,
+        at point: CGPoint,
+        contentFrame: CGRect,
+        zoomTransform: CursorZoomTransform?,
+        outputRect: CGRect
+    ) -> CIImage? {
         let minDimension = min(outputRect.width, outputRect.height)
         var effectImage: CIImage?
 
@@ -157,20 +173,20 @@ final class VideoCompositor {
             }
         }
 
-        if let progress = cursor.leftClickProgress {
+        if let click = cursor.leftClick {
             effectImage = addClickRing(
                 to: effectImage,
-                at: point,
-                progress: progress,
+                at: clickPoint(for: click, in: contentFrame, zoomTransform: zoomTransform),
+                progress: click.progress,
                 color: CGColor(red: 1.0, green: 0.72, blue: 0.06, alpha: 1.0)
             )
         }
 
-        if let progress = cursor.rightClickProgress {
+        if let click = cursor.rightClick {
             effectImage = addClickRing(
                 to: effectImage,
-                at: point,
-                progress: progress,
+                at: clickPoint(for: click, in: contentFrame, zoomTransform: zoomTransform),
+                progress: click.progress,
                 color: CGColor(red: 0.26, green: 0.78, blue: 1.0, alpha: 1.0)
             )
         }
@@ -181,6 +197,15 @@ final class VideoCompositor {
         }
 
         return effectImage
+    }
+
+    private func clickPoint(
+        for click: CursorClickFrameState,
+        in contentFrame: CGRect,
+        zoomTransform: CursorZoomTransform?
+    ) -> CGPoint {
+        let unzoomedPoint = point(for: click.normalizedLocation, in: contentFrame)
+        return zoomTransform?.point(for: unzoomedPoint) ?? unzoomedPoint
     }
 
     private func addClickRing(to image: CIImage?, at point: CGPoint, progress: CGFloat, color: CGColor) -> CIImage? {
@@ -437,6 +462,18 @@ final class VideoCompositor {
 private struct FittedScreenImage {
     let image: CIImage
     let contentFrame: CGRect
+}
+
+private struct CursorZoomTransform {
+    let cropRect: CGRect
+    let scale: CGFloat
+
+    func point(for point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: (point.x - cropRect.minX) * scale,
+            y: (point.y - cropRect.minY) * scale
+        )
+    }
 }
 
 private struct CursorImage {

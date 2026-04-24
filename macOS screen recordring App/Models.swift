@@ -193,9 +193,14 @@ struct CursorEffectSettings {
 
 struct CursorFrameState {
     var normalizedLocation: CGPoint
-    var leftClickProgress: CGFloat?
-    var rightClickProgress: CGFloat?
+    var leftClick: CursorClickFrameState?
+    var rightClick: CursorClickFrameState?
     var settings: CursorEffectSettings
+}
+
+struct CursorClickFrameState {
+    var normalizedLocation: CGPoint
+    var progress: CGFloat
 }
 
 final class OverlayLayoutStore {

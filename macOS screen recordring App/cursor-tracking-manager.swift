@@ -15,8 +15,8 @@ final class CursorTrackingManager {
     private var timer: Timer?
     private var previousLeftButtonDown = false
     private var previousRightButtonDown = false
-    private var lastLeftClickDate: Date?
-    private var lastRightClickDate: Date?
+    private var lastLeftClick: TrackedCursorClick?
+    private var lastRightClick: TrackedCursorClick?
     private var smoothedLocation: CGPoint?
 
     private let pulseDuration: TimeInterval = 0.55
@@ -49,8 +49,8 @@ final class CursorTrackingManager {
         contentRect = .zero
         previousLeftButtonDown = false
         previousRightButtonDown = false
-        lastLeftClickDate = nil
-        lastRightClickDate = nil
+        lastLeftClick = nil
+        lastRightClick = nil
         smoothedLocation = nil
         stateStore.update(nil)
     }
@@ -65,19 +65,11 @@ final class CursorTrackingManager {
         let leftButtonDown = CGEventSource.buttonState(.hidSystemState, button: .left)
         let rightButtonDown = CGEventSource.buttonState(.hidSystemState, button: .right)
 
-        if leftButtonDown && !previousLeftButtonDown {
-            lastLeftClickDate = now
-        }
-        if rightButtonDown && !previousRightButtonDown {
-            lastRightClickDate = now
-        }
-
-        previousLeftButtonDown = leftButtonDown
-        previousRightButtonDown = rightButtonDown
-
         let mouseLocation = NSEvent.mouseLocation
         guard contentRect.contains(mouseLocation) else {
             stateStore.update(nil)
+            previousLeftButtonDown = leftButtonDown
+            previousRightButtonDown = rightButtonDown
             return
         }
 
@@ -93,23 +85,41 @@ final class CursorTrackingManager {
         } ?? rawLocation
         smoothedLocation = location
 
+        if leftButtonDown && !previousLeftButtonDown {
+            lastLeftClick = TrackedCursorClick(date: now, normalizedLocation: location)
+        }
+        if rightButtonDown && !previousRightButtonDown {
+            lastRightClick = TrackedCursorClick(date: now, normalizedLocation: location)
+        }
+
+        previousLeftButtonDown = leftButtonDown
+        previousRightButtonDown = rightButtonDown
+
         stateStore.update(
             CursorFrameState(
                 normalizedLocation: location,
-                leftClickProgress: clickProgress(since: lastLeftClickDate, now: now),
-                rightClickProgress: clickProgress(since: lastRightClickDate, now: now),
+                leftClick: clickState(for: lastLeftClick, now: now),
+                rightClick: clickState(for: lastRightClick, now: now),
                 settings: settings
             )
         )
     }
 
-    private func clickProgress(since date: Date?, now: Date) -> CGFloat? {
-        guard settings.isClickRingsEnabled, let date else { return nil }
+    private func clickState(for click: TrackedCursorClick?, now: Date) -> CursorClickFrameState? {
+        guard settings.isClickRingsEnabled, let click else { return nil }
 
-        let elapsed = now.timeIntervalSince(date)
+        let elapsed = now.timeIntervalSince(click.date)
         guard elapsed >= 0, elapsed <= pulseDuration else { return nil }
-        return CGFloat(elapsed / pulseDuration).clamped(to: 0...1)
+        return CursorClickFrameState(
+            normalizedLocation: click.normalizedLocation,
+            progress: CGFloat(elapsed / pulseDuration).clamped(to: 0...1)
+        )
     }
+}
+
+private struct TrackedCursorClick {
+    var date: Date
+    var normalizedLocation: CGPoint
 }
 
 private extension Comparable {
