@@ -251,7 +251,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Record your webcam as a circular facecam overlay.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Record your webcam as a facecam overlay.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record microphone audio alongside screen captures.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
@@ -283,7 +283,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Record your webcam as a circular facecam overlay.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Record your webcam as a facecam overlay.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record microphone audio alongside screen captures.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";

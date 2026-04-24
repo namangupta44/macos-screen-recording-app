@@ -32,6 +32,12 @@ struct ContentView: View {
         .onChange(of: recordingManager.webcamSizeFraction) { _, _ in
             recordingManager.webcamSizeChanged()
         }
+        .onChange(of: recordingManager.webcamShape) { _, _ in
+            recordingManager.webcamShapeChanged()
+        }
+        .onChange(of: recordingManager.webcamBorderStyle) { _, _ in
+            recordingManager.webcamBorderStyleChanged()
+        }
     }
 
     // MARK: - Sidebar
@@ -48,7 +54,7 @@ struct ContentView: View {
                     sourceCard
                     cameraCard
                     microphoneCard
-                    webcamSizeCard
+                    webcamLookCard
 
                     if recordingManager.needsAVPermissionsPrompt {
                         permissionsCard
@@ -176,9 +182,9 @@ struct ContentView: View {
         }
     }
 
-    private var webcamSizeCard: some View {
-        SettingsCard(icon: "circle.circle.fill", iconTint: .teal, title: "Webcam Size") {
-            VStack(alignment: .leading, spacing: 8) {
+    private var webcamLookCard: some View {
+        SettingsCard(icon: "square.on.circle", iconTint: .teal, title: "Webcam Look") {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Overlay scale")
                         .font(.system(size: 12))
@@ -193,10 +199,57 @@ struct ContentView: View {
                         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 5))
                 }
 
-                Slider(value: $recordingManager.webcamSizeFraction, in: 0.15...0.28, step: 0.01)
+                Slider(
+                    value: $recordingManager.webcamSizeFraction,
+                    in: Double(OverlayPanelManager.sizeFractionRange.lowerBound)...Double(OverlayPanelManager.sizeFractionRange.upperBound),
+                    step: 0.01
+                )
                     .controlSize(.small)
                     .tint(.red)
-                    .disabled(recordingManager.isRecording)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Shape")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    Picker("", selection: $recordingManager.webcamShape) {
+                        ForEach(OverlayShape.allCases) { shape in
+                            Text(shape.title).tag(shape)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+
+                HStack(spacing: 10) {
+                    Text("Border")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 0)
+
+                    Picker("", selection: $recordingManager.webcamBorderStyle) {
+                        ForEach(OverlayBorderStyle.allCases) { borderStyle in
+                            Text(borderStyle.title).tag(borderStyle)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 118)
+                }
+
+                Button {
+                    recordingManager.resetPreviewOverlayPosition()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "scope")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Reset Position")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SidebarButtonStyle(tint: .secondary))
             }
         }
     }
@@ -304,7 +357,7 @@ struct ContentView: View {
 
     private var subtitleText: String {
         if recordingManager.isRecording {
-            return "Recording in progress · circular webcam overlay is live."
+            return "Recording in progress · webcam overlay is live."
         } else if recordingManager.hasPickedSource {
             return "Live preview of your composition."
         } else {
@@ -355,6 +408,21 @@ struct ContentView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                if recordingManager.canPositionWebcamInPreview {
+                    PreviewOverlayDragLayer(
+                        normalizedCenter: recordingManager.overlayNormalizedCenter,
+                        sizeFraction: CGFloat(recordingManager.webcamSizeFraction),
+                        shape: recordingManager.webcamShape,
+                        borderStyle: recordingManager.webcamBorderStyle
+                    ) { displayPoint, displaySize in
+                        recordingManager.updatePreviewOverlayCenter(
+                            displayPoint: displayPoint,
+                            in: displaySize
+                        )
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
             } else {
                 emptyPreview
             }
@@ -512,6 +580,150 @@ struct ContentView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!recordingManager.canStartRecording)
             }
+        }
+    }
+}
+
+private struct PreviewOverlayDragLayer: View {
+    let normalizedCenter: CGPoint
+    let sizeFraction: CGFloat
+    let shape: OverlayShape
+    let borderStyle: OverlayBorderStyle
+    let onMove: (CGPoint, CGSize) -> Void
+
+    @State private var isHovering = false
+    @State private var dragStartCenter: CGPoint?
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            let side = min(size.width, size.height) * sizeFraction
+            let center = CGPoint(
+                x: size.width * normalizedCenter.x,
+                y: size.height * (1 - normalizedCenter.y)
+            )
+
+            OverlayPreviewShape(overlayShape: shape)
+                .fill(Color.white.opacity(isHovering ? 0.05 : 0.001))
+                .overlay {
+                    if borderStyle != .none {
+                        OverlayPreviewShape(overlayShape: shape)
+                            .stroke(
+                                borderStyle.previewBorderColor,
+                                lineWidth: borderStyle.previewBorderWidth
+                            )
+                            .shadow(
+                                color: borderStyle.previewShadowColor,
+                                radius: borderStyle.previewShadowRadius,
+                                x: 0,
+                                y: 2
+                            )
+                    }
+                }
+                .overlay {
+                    if isHovering {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: max(12, side * 0.12), weight: .bold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .padding(8)
+                            .background(.black.opacity(0.48), in: Circle())
+                    }
+                }
+                .frame(width: side, height: side)
+                .position(center)
+                .contentShape(OverlayPreviewShape(overlayShape: shape))
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let start = dragStartCenter ?? center
+                            dragStartCenter = start
+                            onMove(
+                                CGPoint(
+                                    x: start.x + value.translation.width,
+                                    y: start.y + value.translation.height
+                                ),
+                                size
+                            )
+                        }
+                        .onEnded { _ in
+                            dragStartCenter = nil
+                        }
+                )
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        isHovering = hovering
+                    }
+                }
+                .help("Drag to position webcam")
+        }
+    }
+}
+
+private struct OverlayPreviewShape: Shape {
+    let overlayShape: OverlayShape
+
+    func path(in rect: CGRect) -> Path {
+        switch overlayShape {
+        case .circle:
+            return Path(ellipseIn: rect)
+        case .roundedSquare:
+            return Path(roundedRect: rect, cornerRadius: min(rect.width, rect.height) * 0.22)
+        case .square:
+            return Path(rect)
+        }
+    }
+}
+
+private extension OverlayBorderStyle {
+    var previewBorderColor: Color {
+        switch self {
+        case .soft:
+            return .white.opacity(0.74)
+        case .studio:
+            return .white.opacity(0.95)
+        case .glow:
+            return Color(red: 0.45, green: 0.78, blue: 1.0).opacity(0.95)
+        case .none:
+            return .clear
+        }
+    }
+
+    var previewBorderWidth: CGFloat {
+        switch self {
+        case .soft:
+            return 2
+        case .studio:
+            return 4
+        case .glow:
+            return 3
+        case .none:
+            return 0
+        }
+    }
+
+    var previewShadowColor: Color {
+        switch self {
+        case .soft:
+            return .black.opacity(0.24)
+        case .studio:
+            return .black.opacity(0.32)
+        case .glow:
+            return Color(red: 0.2, green: 0.65, blue: 1.0).opacity(0.5)
+        case .none:
+            return .clear
+        }
+    }
+
+    var previewShadowRadius: CGFloat {
+        switch self {
+        case .soft:
+            return 6
+        case .studio:
+            return 8
+        case .glow:
+            return 12
+        case .none:
+            return 0
         }
     }
 }

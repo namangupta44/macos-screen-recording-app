@@ -13,9 +13,52 @@ struct ScreenCaptureSelection {
     let sourceSize: CGSize
 }
 
+enum OverlayShape: String, CaseIterable, Identifiable {
+    case circle
+    case roundedSquare
+    case square
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .circle:
+            return "Circle"
+        case .roundedSquare:
+            return "Rounded"
+        case .square:
+            return "Square"
+        }
+    }
+}
+
+enum OverlayBorderStyle: String, CaseIterable, Identifiable {
+    case soft
+    case studio
+    case glow
+    case none
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .soft:
+            return "Soft"
+        case .studio:
+            return "Studio"
+        case .glow:
+            return "Glow"
+        case .none:
+            return "None"
+        }
+    }
+}
+
 struct OverlayLayout {
     var normalizedCenter: CGPoint
     var sizeFraction: CGFloat
+    var shape: OverlayShape
+    var borderStyle: OverlayBorderStyle
 }
 
 final class OverlayLayoutStore {

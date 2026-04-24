@@ -42,3 +42,11 @@
 - Drive both the live preview and the recording output from a single `SCStream` built from the picker-provided filter. Feed preview frames off `didOutputSampleBuffer` (throttled to ~20fps for the UI) and, while recording, tee the same sample buffers to `AVAssetWriter`. This removes the need for a parallel `SCScreenshotManager` polling loop (which had its own TCC prompt risk) and keeps the preview perfectly in sync with what is being recorded.
 - Cap the `SCStreamConfiguration` `width`/`height` derived from `filter.contentRect * filter.pointPixelScale` to the longest-edge of 1920 and force both dimensions even. Retina displays routinely produce odd dimensions like 3024x1890 which the H.264 encoder will silently reject, leaving an empty `.mov`.
 - Never call `CameraCaptureManager.configure(videoDeviceID:audioDeviceID:)` while `isRecording` is true: it rebuilds the `AVCaptureSession` inputs and yanks the microphone mid-recording, producing `.mov` files with audible drops. Gate all preview-only reconfigurations (camera picker change, `applicationDidBecomeActive`) on `!isRecording`.
+
+## 2026-04-24 13:54 IST
+
+- When adding live facecam overlay controls, update `OverlayPanelManager.layoutStore` as the single source of truth. The floating panel UI and `RecordingPipeline` both read that store, so live resize/drag changes made during recording must go through it to keep the visible overlay and saved video aligned.
+
+## 2026-04-24 14:07 IST
+
+- The main preview uses SwiftUI's top-left coordinate space, while `VideoCompositor` uses a bottom-left Core Image coordinate space. When dragging the webcam overlay in the preview, convert the preview Y coordinate with `1 - (displayY / displayHeight)` before writing `OverlayLayout.normalizedCenter`, otherwise the saved recording position is vertically flipped.

@@ -49,6 +49,9 @@ final class RecordingManager: ObservableObject {
     @Published var selectedCameraID: String?
     @Published var selectedMicrophoneID: String?
     @Published var webcamSizeFraction: Double
+    @Published var webcamShape: OverlayShape = .circle
+    @Published var webcamBorderStyle: OverlayBorderStyle = .soft
+    @Published var overlayNormalizedCenter: CGPoint = CGPoint(x: 0.84, y: 0.2)
 
     @Published var isRecording = false
     @Published var elapsedTimeText = "00:00"
@@ -62,6 +65,7 @@ final class RecordingManager: ObservableObject {
 
     // MARK: - Computed
     var webcamSizeLabel: String { "\(Int(webcamSizeFraction * 100))%" }
+    var canPositionWebcamInPreview: Bool { previewImage != nil && selectedCameraID != nil }
 
     var hasPickedSource: Bool { pickedSelection != nil }
 
@@ -118,7 +122,13 @@ final class RecordingManager: ObservableObject {
     // MARK: - Lifecycle
 
     init() {
-        webcamSizeFraction = defaults.object(forKey: "overlay.sizeFraction") as? Double ?? 0.18
+        let savedSize = CGFloat(defaults.object(forKey: "overlay.sizeFraction") as? Double ?? 0.18)
+        webcamSizeFraction = Double(OverlayPanelManager.clampedSizeFraction(savedSize))
+        let initialLayout = overlayPanelManager.layoutStore.current()
+        webcamShape = initialLayout.shape
+        webcamBorderStyle = initialLayout.borderStyle
+        overlayNormalizedCenter = initialLayout.normalizedCenter
+        configureOverlayCallbacks()
         configureCameraCallbacks()
         configureScreenCaptureCallbacks()
         configureScreenSourcePickerCallbacks()
@@ -176,7 +186,45 @@ final class RecordingManager: ObservableObject {
     }
 
     func webcamSizeChanged() {
-        defaults.set(webcamSizeFraction, forKey: "overlay.sizeFraction")
+        let clampedSizeFraction = OverlayPanelManager.clampedSizeFraction(CGFloat(webcamSizeFraction))
+        if abs(webcamSizeFraction - Double(clampedSizeFraction)) > 0.0001 {
+            webcamSizeFraction = Double(clampedSizeFraction)
+        }
+        defaults.set(Double(clampedSizeFraction), forKey: "overlay.sizeFraction")
+        overlayPanelManager.updateSizeFraction(clampedSizeFraction)
+        syncPreviewOverlayLayout()
+    }
+
+    func webcamShapeChanged() {
+        overlayPanelManager.updateShape(webcamShape)
+        syncPreviewOverlayLayout()
+    }
+
+    func webcamBorderStyleChanged() {
+        overlayPanelManager.updateBorderStyle(webcamBorderStyle)
+        syncPreviewOverlayLayout()
+    }
+
+    func updatePreviewOverlayCenter(displayPoint: CGPoint, in displaySize: CGSize) {
+        guard displaySize.width > 0, displaySize.height > 0 else { return }
+
+        let side = min(displaySize.width, displaySize.height) * CGFloat(webcamSizeFraction)
+        let xMargin = min(0.48, max(0.02, (side / 2) / displaySize.width))
+        let yMargin = min(0.48, max(0.02, (side / 2) / displaySize.height))
+        let normalizedCenter = CGPoint(
+            x: (displayPoint.x / displaySize.width).clamped(to: xMargin...(1 - xMargin)),
+            y: (1 - (displayPoint.y / displaySize.height)).clamped(to: yMargin...(1 - yMargin))
+        )
+
+        overlayNormalizedCenter = normalizedCenter
+        overlayPanelManager.updateNormalizedCenter(normalizedCenter)
+        syncPreviewOverlayLayout()
+    }
+
+    func resetPreviewOverlayPosition() {
+        let normalizedCenter = CGPoint(x: 0.84, y: 0.2)
+        overlayNormalizedCenter = normalizedCenter
+        overlayPanelManager.updateNormalizedCenter(normalizedCenter)
         syncPreviewOverlayLayout()
     }
 
@@ -474,6 +522,20 @@ final class RecordingManager: ObservableObject {
 
     // MARK: - Status / overlay helpers
 
+    private func configureOverlayCallbacks() {
+        overlayPanelManager.onSizeFractionChanged = { [weak self] sizeFraction in
+            guard let self else { return }
+            self.webcamSizeFraction = Double(sizeFraction)
+            self.defaults.set(Double(sizeFraction), forKey: "overlay.sizeFraction")
+            self.syncPreviewOverlayLayout()
+        }
+        overlayPanelManager.onNormalizedCenterChanged = { [weak self] center in
+            guard let self else { return }
+            self.overlayNormalizedCenter = center
+            self.syncPreviewOverlayLayout()
+        }
+    }
+
     private func refreshStatus() {
         if isRecording {
             statusMessage = "Recording…"
@@ -495,6 +557,9 @@ final class RecordingManager: ObservableObject {
     private func syncPreviewOverlayLayout() {
         var layout = overlayPanelManager.layoutStore.current()
         layout.sizeFraction = webcamSizeFraction
+        layout.normalizedCenter = overlayNormalizedCenter
+        layout.shape = webcamShape
+        layout.borderStyle = webcamBorderStyle
         overlayPanelManager.layoutStore.update(layout)
     }
 
@@ -678,5 +743,11 @@ private extension CGRect {
 private extension CMSampleBuffer {
     var presentationTimeStamp: CMTime {
         CMSampleBufferGetPresentationTimeStamp(self)
+    }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }
