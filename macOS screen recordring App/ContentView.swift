@@ -38,6 +38,21 @@ struct ContentView: View {
         .onChange(of: recordingManager.webcamBorderStyle) { _, _ in
             recordingManager.webcamBorderStyleChanged()
         }
+        .onChange(of: recordingManager.cursorHighlightEnabled) { _, _ in
+            recordingManager.cursorEffectsChanged()
+        }
+        .onChange(of: recordingManager.cursorScale) { _, _ in
+            recordingManager.cursorScaleChanged()
+        }
+        .onChange(of: recordingManager.cursorClickRingsEnabled) { _, _ in
+            recordingManager.cursorEffectsChanged()
+        }
+        .onChange(of: recordingManager.cursorZoomEnabled) { _, _ in
+            recordingManager.cursorEffectsChanged()
+        }
+        .onChange(of: recordingManager.cursorZoomScale) { _, _ in
+            recordingManager.cursorZoomScaleChanged()
+        }
     }
 
     // MARK: - Sidebar
@@ -55,6 +70,7 @@ struct ContentView: View {
                     cameraCard
                     microphoneCard
                     webcamLookCard
+                    cursorEffectsCard
 
                     if recordingManager.needsAVPermissionsPrompt {
                         permissionsCard
@@ -250,6 +266,83 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(SidebarButtonStyle(tint: .secondary))
+            }
+        }
+    }
+
+    private var cursorEffectsCard: some View {
+        SettingsCard(icon: "cursorarrow.motionlines", iconTint: .pink, title: "Cursor Effects") {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Cursor size")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(recordingManager.cursorScaleLabel)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 5))
+                    }
+
+                    Slider(
+                        value: $recordingManager.cursorScale,
+                        in: Double(CursorEffectSettings.cursorScaleRange.lowerBound)...Double(CursorEffectSettings.cursorScaleRange.upperBound),
+                        step: 0.1
+                    )
+                    .controlSize(.small)
+                    .tint(.pink)
+                }
+
+                Toggle(isOn: $recordingManager.cursorHighlightEnabled) {
+                    Label("Highlight cursor", systemImage: "circle")
+                        .font(.system(size: 12))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                Toggle(isOn: $recordingManager.cursorClickRingsEnabled) {
+                    Label("Click rings", systemImage: "smallcircle.filled.circle")
+                        .font(.system(size: 12))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                Toggle(isOn: $recordingManager.cursorZoomEnabled) {
+                    Label("Follow zoom", systemImage: "plus.magnifyingglass")
+                        .font(.system(size: 12))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Zoom scale")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(recordingManager.cursorZoomScaleLabel)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 5))
+                    }
+
+                    Slider(
+                        value: $recordingManager.cursorZoomScale,
+                        in: Double(CursorEffectSettings.zoomScaleRange.lowerBound)...Double(CursorEffectSettings.zoomScaleRange.upperBound),
+                        step: 0.25
+                    )
+                    .controlSize(.small)
+                    .tint(.pink)
+                    .disabled(!recordingManager.cursorZoomEnabled)
+                }
+                .opacity(recordingManager.cursorZoomEnabled ? 1 : 0.45)
             }
         }
     }

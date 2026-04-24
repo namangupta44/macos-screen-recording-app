@@ -45,7 +45,7 @@ final class ScreenCaptureManager: NSObject {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.queueDepth = 4
         configuration.capturesAudio = false
-        configuration.showsCursor = true
+        configuration.showsCursor = false
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)

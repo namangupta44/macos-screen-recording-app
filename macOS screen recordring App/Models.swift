@@ -61,6 +61,28 @@ struct OverlayLayout {
     var borderStyle: OverlayBorderStyle
 }
 
+struct CursorEffectSettings {
+    static let cursorScaleRange: ClosedRange<CGFloat> = 1.0...3.0
+    static let zoomScaleRange: ClosedRange<CGFloat> = 1.25...3.0
+
+    var cursorScale: CGFloat
+    var isHighlightEnabled: Bool
+    var isClickRingsEnabled: Bool
+    var isZoomEnabled: Bool
+    var zoomScale: CGFloat
+
+    var hasEnabledEffects: Bool {
+        cursorScale > 0 || isHighlightEnabled || isClickRingsEnabled || isZoomEnabled
+    }
+}
+
+struct CursorFrameState {
+    var normalizedLocation: CGPoint
+    var leftClickProgress: CGFloat?
+    var rightClickProgress: CGFloat?
+    var settings: CursorEffectSettings
+}
+
 final class OverlayLayoutStore {
     private let lock = NSLock()
     private var layout: OverlayLayout
@@ -98,5 +120,23 @@ final class LatestCameraFrameStore {
         let pixelBuffer = self.pixelBuffer
         lock.unlock()
         return pixelBuffer
+    }
+}
+
+final class CursorStateStore {
+    private let lock = NSLock()
+    private var state: CursorFrameState?
+
+    func update(_ state: CursorFrameState?) {
+        lock.lock()
+        self.state = state
+        lock.unlock()
+    }
+
+    func current() -> CursorFrameState? {
+        lock.lock()
+        let state = self.state
+        lock.unlock()
+        return state
     }
 }

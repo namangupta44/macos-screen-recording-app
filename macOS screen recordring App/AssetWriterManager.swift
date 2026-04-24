@@ -83,6 +83,7 @@ final class AssetWriterManager {
         screenPixelBuffer: CVPixelBuffer,
         cameraPixelBuffer: CVPixelBuffer?,
         overlay: OverlayLayout,
+        cursor: CursorFrameState?,
         at time: CMTime,
         compositor: VideoCompositor
     ) throws {
@@ -116,6 +117,7 @@ final class AssetWriterManager {
             screenPixelBuffer: screenPixelBuffer,
             cameraPixelBuffer: cameraPixelBuffer,
             overlay: overlay,
+            cursor: cursor,
             into: renderedPixelBuffer,
             outputSize: outputSize
         )

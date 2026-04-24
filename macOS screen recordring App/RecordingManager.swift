@@ -52,6 +52,11 @@ final class RecordingManager: ObservableObject {
     @Published var webcamShape: OverlayShape = .circle
     @Published var webcamBorderStyle: OverlayBorderStyle = .soft
     @Published var overlayNormalizedCenter: CGPoint = CGPoint(x: 0.84, y: 0.2)
+    @Published var cursorScale = 1.5
+    @Published var cursorHighlightEnabled = true
+    @Published var cursorClickRingsEnabled = true
+    @Published var cursorZoomEnabled = false
+    @Published var cursorZoomScale = 2.0
 
     @Published var isRecording = false
     @Published var elapsedTimeText = "00:00"
@@ -65,6 +70,8 @@ final class RecordingManager: ObservableObject {
 
     // MARK: - Computed
     var webcamSizeLabel: String { "\(Int(webcamSizeFraction * 100))%" }
+    var cursorScaleLabel: String { "\(Int(cursorScale * 100))%" }
+    var cursorZoomScaleLabel: String { String(format: "%.1fx", cursorZoomScale) }
     var canPositionWebcamInPreview: Bool { previewImage != nil && selectedCameraID != nil }
 
     var hasPickedSource: Bool { pickedSelection != nil }
@@ -95,12 +102,15 @@ final class RecordingManager: ObservableObject {
     private let screenCaptureManager = ScreenCaptureManager()
     private let screenSourcePickerManager = ScreenSourcePickerManager()
     private let cameraFrameStore = LatestCameraFrameStore()
+    private let cursorStateStore = CursorStateStore()
     private let previewCompositor = VideoCompositor()
+    private lazy var cursorTrackingManager = CursorTrackingManager(stateStore: cursorStateStore)
 
     private lazy var pipeline: RecordingPipeline = {
         let pipeline = RecordingPipeline(
             cameraFrameStore: cameraFrameStore,
-            overlayLayoutStore: overlayPanelManager.layoutStore
+            overlayLayoutStore: overlayPanelManager.layoutStore,
+            cursorStateStore: cursorStateStore
         )
         pipeline.onFailure = { [weak self] error in
             Task { @MainActor [weak self] in
@@ -124,6 +134,11 @@ final class RecordingManager: ObservableObject {
     init() {
         let savedSize = CGFloat(defaults.object(forKey: "overlay.sizeFraction") as? Double ?? 0.18)
         webcamSizeFraction = Double(OverlayPanelManager.clampedSizeFraction(savedSize))
+        cursorScale = Double(Self.clampedCursorScale(CGFloat(defaults.object(forKey: "cursor.scale") as? Double ?? 1.5)))
+        cursorHighlightEnabled = defaults.object(forKey: "cursor.highlightEnabled") as? Bool ?? true
+        cursorClickRingsEnabled = defaults.object(forKey: "cursor.clickRingsEnabled") as? Bool ?? true
+        cursorZoomEnabled = defaults.object(forKey: "cursor.zoomEnabled") as? Bool ?? false
+        cursorZoomScale = Double(Self.clampedCursorZoomScale(CGFloat(defaults.object(forKey: "cursor.zoomScale") as? Double ?? 2.0)))
         let initialLayout = overlayPanelManager.layoutStore.current()
         webcamShape = initialLayout.shape
         webcamBorderStyle = initialLayout.borderStyle
@@ -203,6 +218,32 @@ final class RecordingManager: ObservableObject {
     func webcamBorderStyleChanged() {
         overlayPanelManager.updateBorderStyle(webcamBorderStyle)
         syncPreviewOverlayLayout()
+    }
+
+    func cursorEffectsChanged() {
+        defaults.set(cursorScale, forKey: "cursor.scale")
+        defaults.set(cursorHighlightEnabled, forKey: "cursor.highlightEnabled")
+        defaults.set(cursorClickRingsEnabled, forKey: "cursor.clickRingsEnabled")
+        defaults.set(cursorZoomEnabled, forKey: "cursor.zoomEnabled")
+        cursorTrackingManager.updateSettings(currentCursorEffectSettings())
+    }
+
+    func cursorScaleChanged() {
+        let clampedScale = Self.clampedCursorScale(CGFloat(cursorScale))
+        if abs(cursorScale - Double(clampedScale)) > 0.0001 {
+            cursorScale = Double(clampedScale)
+        }
+        defaults.set(Double(clampedScale), forKey: "cursor.scale")
+        cursorTrackingManager.updateSettings(currentCursorEffectSettings())
+    }
+
+    func cursorZoomScaleChanged() {
+        let clampedScale = Self.clampedCursorZoomScale(CGFloat(cursorZoomScale))
+        if abs(cursorZoomScale - Double(clampedScale)) > 0.0001 {
+            cursorZoomScale = Double(clampedScale)
+        }
+        defaults.set(Double(clampedScale), forKey: "cursor.zoomScale")
+        cursorTrackingManager.updateSettings(currentCursorEffectSettings())
     }
 
     func updatePreviewOverlayCenter(displayPoint: CGPoint, in displaySize: CGSize) {
@@ -294,6 +335,7 @@ final class RecordingManager: ObservableObject {
             }
 
             try pipeline.start(outputURL: outputURL, outputSize: recordingCanvasSize)
+            startCursorTracking(for: pickedSelection)
 
             screenCaptureManager.onRecordingSampleBuffer = { [weak self] sampleBuffer in
                 self?.pipeline.appendScreen(sampleBuffer)
@@ -397,6 +439,7 @@ final class RecordingManager: ObservableObject {
             screenPixelBuffer: pixelBuffer,
             cameraPixelBuffer: cameraFrameStore.current(),
             overlay: currentPreviewOverlayLayout(),
+            cursor: cursorStateStore.current(),
             outputSize: previewCanvasSize
         ) else {
             return
@@ -419,6 +462,7 @@ final class RecordingManager: ObservableObject {
             pipeline.cancel()
             cameraCaptureManager.onAudioSampleBuffer = nil
             screenCaptureManager.onRecordingSampleBuffer = nil
+            cursorTrackingManager.stop()
         }
 
         previewMessage = "The selected source stopped. Click Choose Screen Source to pick another."
@@ -453,11 +497,13 @@ final class RecordingManager: ObservableObject {
 
         do {
             try await screenCaptureManager.start(filter: filter)
+            startCursorTracking(for: selection)
             permissionMessage = ""
             refreshStatus()
         } catch {
             pickedSelection = nil
             pickedSourceName = nil
+            cursorTrackingManager.stop()
             previewMessage = "Couldn't start capture: \(error.localizedDescription)"
             statusMessage = previewMessage
         }
@@ -568,6 +614,31 @@ final class RecordingManager: ObservableObject {
         return overlayPanelManager.layoutStore.current()
     }
 
+    private func currentCursorEffectSettings() -> CursorEffectSettings {
+        CursorEffectSettings(
+            cursorScale: Self.clampedCursorScale(CGFloat(cursorScale)),
+            isHighlightEnabled: cursorHighlightEnabled,
+            isClickRingsEnabled: cursorClickRingsEnabled,
+            isZoomEnabled: cursorZoomEnabled,
+            zoomScale: Self.clampedCursorZoomScale(CGFloat(cursorZoomScale))
+        )
+    }
+
+    private func startCursorTracking(for selection: ScreenCaptureSelection) {
+        cursorTrackingManager.start(
+            contentRect: selection.contentRect,
+            settings: currentCursorEffectSettings()
+        )
+    }
+
+    private static func clampedCursorScale(_ value: CGFloat) -> CGFloat {
+        value.clamped(to: CursorEffectSettings.cursorScaleRange)
+    }
+
+    private static func clampedCursorZoomScale(_ value: CGFloat) -> CGFloat {
+        value.clamped(to: CursorEffectSettings.zoomScaleRange)
+    }
+
     // MARK: - Recording plumbing
 
     private func startElapsedTimer() {
@@ -595,6 +666,7 @@ final class RecordingManager: ObservableObject {
 
     private func cleanupAfterFailure(_ error: Error) async {
         screenCaptureManager.onRecordingSampleBuffer = nil
+        cursorTrackingManager.stop()
         overlayPanelManager.hide()
         cameraCaptureManager.onAudioSampleBuffer = nil
         pipeline.cancel()
@@ -639,6 +711,7 @@ private final class RecordingPipeline: @unchecked Sendable {
     private let queue = DispatchQueue(label: "recorder.pipeline")
     private let cameraFrameStore: LatestCameraFrameStore
     private let overlayLayoutStore: OverlayLayoutStore
+    private let cursorStateStore: CursorStateStore
     private let compositor = VideoCompositor()
 
     var onFailure: ((Error) -> Void)?
@@ -646,9 +719,14 @@ private final class RecordingPipeline: @unchecked Sendable {
     private var writer: AssetWriterManager?
     private var terminalError: Error?
 
-    init(cameraFrameStore: LatestCameraFrameStore, overlayLayoutStore: OverlayLayoutStore) {
+    init(
+        cameraFrameStore: LatestCameraFrameStore,
+        overlayLayoutStore: OverlayLayoutStore,
+        cursorStateStore: CursorStateStore
+    ) {
         self.cameraFrameStore = cameraFrameStore
         self.overlayLayoutStore = overlayLayoutStore
+        self.cursorStateStore = cursorStateStore
     }
 
     func start(outputURL: URL, outputSize: CGSize) throws {
@@ -666,6 +744,7 @@ private final class RecordingPipeline: @unchecked Sendable {
                     screenPixelBuffer: screenPixelBuffer,
                     cameraPixelBuffer: self.cameraFrameStore.current(),
                     overlay: self.overlayLayoutStore.current(),
+                    cursor: self.cursorStateStore.current(),
                     at: sampleBuffer.presentationTimeStamp,
                     compositor: self.compositor
                 )
