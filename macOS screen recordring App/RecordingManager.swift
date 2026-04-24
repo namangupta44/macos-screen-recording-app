@@ -103,8 +103,21 @@ final class RecordingManager: ObservableObject {
     private let screenSourcePickerManager = ScreenSourcePickerManager()
     private let cameraFrameStore = LatestCameraFrameStore()
     private let cursorStateStore = CursorStateStore()
-    private let previewCompositor = VideoCompositor()
     private lazy var cursorTrackingManager = CursorTrackingManager(stateStore: cursorStateStore)
+    private lazy var previewRenderer: PreviewRenderPipeline = {
+        let renderer = PreviewRenderPipeline(
+            cameraFrameStore: cameraFrameStore,
+            overlayLayoutStore: overlayPanelManager.layoutStore,
+            cursorStateStore: cursorStateStore,
+            outputSize: previewCanvasSize
+        )
+        renderer.onImage = { [weak self] image in
+            Task { @MainActor [weak self] in
+                self?.publishPreviewImage(image)
+            }
+        }
+        return renderer
+    }()
 
     private lazy var pipeline: RecordingPipeline = {
         let pipeline = RecordingPipeline(
@@ -126,8 +139,6 @@ final class RecordingManager: ObservableObject {
     private var recordingStartDate: Date?
     private let previewCanvasSize = CGSize(width: 1280, height: 720)
     private let recordingCanvasSize = CGSize(width: 1920, height: 1080)
-    private var lastPreviewRender = Date.distantPast
-    private let previewThrottleInterval: TimeInterval = 1.0 / 20.0
 
     // MARK: - Lifecycle
 
@@ -418,10 +429,9 @@ final class RecordingManager: ObservableObject {
     // MARK: - Screen capture (picker-driven)
 
     private func configureScreenCaptureCallbacks() {
-        screenCaptureManager.onPreviewPixelBuffer = { [weak self] pixelBuffer in
-            Task { @MainActor [weak self] in
-                self?.handlePreviewPixelBuffer(pixelBuffer)
-            }
+        let previewRenderer = previewRenderer
+        screenCaptureManager.onPreviewPixelBuffer = { pixelBuffer in
+            previewRenderer.enqueue(pixelBuffer)
         }
         screenCaptureManager.onStreamError = { [weak self] error in
             Task { @MainActor [weak self] in
@@ -430,21 +440,7 @@ final class RecordingManager: ObservableObject {
         }
     }
 
-    private func handlePreviewPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
-        let now = Date()
-        guard now.timeIntervalSince(lastPreviewRender) >= previewThrottleInterval else { return }
-        lastPreviewRender = now
-
-        guard let composedImage = previewCompositor.previewImage(
-            screenPixelBuffer: pixelBuffer,
-            cameraPixelBuffer: cameraFrameStore.current(),
-            overlay: currentPreviewOverlayLayout(),
-            cursor: cursorStateStore.current(),
-            outputSize: previewCanvasSize
-        ) else {
-            return
-        }
-
+    private func publishPreviewImage(_ composedImage: CGImage) {
         previewImage = NSImage(cgImage: composedImage, size: previewCanvasSize)
         previewMessage = ""
     }
@@ -454,6 +450,7 @@ final class RecordingManager: ObservableObject {
         pickedSelection = nil
         pickedSourceName = nil
         previewImage = nil
+        previewRenderer.reset()
         overlayPanelManager.hide()
 
         if isRecording {
@@ -492,6 +489,7 @@ final class RecordingManager: ObservableObject {
         pickedSelection = selection
         pickedSourceName = sourceName(for: filter)
         previewImage = nil
+        previewRenderer.reset()
         previewMessage = "Starting live preview…"
         statusMessage = "Starting capture for \(pickedSourceName ?? "selected source")…"
 
@@ -702,6 +700,124 @@ final class RecordingManager: ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
         return formatter.string(from: .now)
+    }
+}
+
+// MARK: - Preview rendering
+
+private final class PreviewRenderPipeline: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "recorder.preview.render", qos: .userInitiated)
+    private let lock = NSLock()
+    private let cameraFrameStore: LatestCameraFrameStore
+    private let overlayLayoutStore: OverlayLayoutStore
+    private let cursorStateStore: CursorStateStore
+    private let outputSize: CGSize
+    private let compositor = VideoCompositor()
+    private let throttleInterval: TimeInterval = 1.0 / 20.0
+
+    var onImage: ((CGImage) -> Void)?
+
+    private var pendingPixelBuffer: CVPixelBuffer?
+    private var isRenderScheduled = false
+    private var lastRenderDate = Date.distantPast
+    private var generation = 0
+
+    init(
+        cameraFrameStore: LatestCameraFrameStore,
+        overlayLayoutStore: OverlayLayoutStore,
+        cursorStateStore: CursorStateStore,
+        outputSize: CGSize
+    ) {
+        self.cameraFrameStore = cameraFrameStore
+        self.overlayLayoutStore = overlayLayoutStore
+        self.cursorStateStore = cursorStateStore
+        self.outputSize = outputSize
+    }
+
+    func enqueue(_ pixelBuffer: CVPixelBuffer) {
+        let shouldSchedule: Bool
+
+        lock.lock()
+        pendingPixelBuffer = pixelBuffer
+        shouldSchedule = !isRenderScheduled && Date().timeIntervalSince(lastRenderDate) >= throttleInterval
+        if shouldSchedule {
+            isRenderScheduled = true
+        }
+        lock.unlock()
+
+        if shouldSchedule {
+            queue.async { [weak self] in
+                self?.renderLatest()
+            }
+        }
+    }
+
+    func reset() {
+        lock.lock()
+        pendingPixelBuffer = nil
+        isRenderScheduled = false
+        lastRenderDate = .distantPast
+        generation += 1
+        lock.unlock()
+    }
+
+    private func renderLatest() {
+        let pixelBuffer: CVPixelBuffer?
+        let renderGeneration: Int
+
+        lock.lock()
+        pixelBuffer = pendingPixelBuffer
+        pendingPixelBuffer = nil
+        lastRenderDate = Date()
+        renderGeneration = generation
+        lock.unlock()
+
+        guard let pixelBuffer else {
+            markRenderFinishedAndScheduleIfNeeded()
+            return
+        }
+
+        let image = compositor.previewImage(
+            screenPixelBuffer: pixelBuffer,
+            cameraPixelBuffer: cameraFrameStore.current(),
+            overlay: overlayLayoutStore.current(),
+            cursor: cursorStateStore.current(),
+            outputSize: outputSize
+        )
+
+        if let image, isCurrentGeneration(renderGeneration) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCurrentGeneration(renderGeneration) else { return }
+                self.onImage?(image)
+            }
+        }
+
+        markRenderFinishedAndScheduleIfNeeded()
+    }
+
+    private func markRenderFinishedAndScheduleIfNeeded() {
+        let shouldSchedule: Bool
+
+        lock.lock()
+        isRenderScheduled = false
+        shouldSchedule = pendingPixelBuffer != nil && Date().timeIntervalSince(lastRenderDate) >= throttleInterval
+        if shouldSchedule {
+            isRenderScheduled = true
+        }
+        lock.unlock()
+
+        if shouldSchedule {
+            queue.async { [weak self] in
+                self?.renderLatest()
+            }
+        }
+    }
+
+    private func isCurrentGeneration(_ renderGeneration: Int) -> Bool {
+        lock.lock()
+        let isCurrent = renderGeneration == generation
+        lock.unlock()
+        return isCurrent
     }
 }
 

@@ -54,3 +54,7 @@
 ## 2026-04-24 14:51 IST
 
 - Cursor highlight, click rings, custom cursor size, and follow zoom should stay in the existing compositor pipeline. Hide ScreenCaptureKit's built-in cursor (`configuration.showsCursor = false`), sample `NSEvent.mouseLocation` against the picker filter's `contentRect` as soon as preview capture starts, store normalized cursor state in a lock-protected store, and let `VideoCompositor` draw/zoom per frame; do not introduce a second capture or post-processing path.
+
+## 2026-04-24 15:07 IST
+
+- Keep live preview compositing off the main actor. The preview path should throttle to about 20fps, render the latest available frame on a dedicated serial queue, drop stale pending frames, and only publish the finished `NSImage`/`CGImage` back to SwiftUI on the main actor; otherwise `CIContext.createCGImage` plus webcam/cursor effects can make the preview window feel hung.

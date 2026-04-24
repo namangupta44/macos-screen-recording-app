@@ -239,8 +239,10 @@ final class VideoCompositor {
     private func makeCursorImage(settings: CursorEffectSettings, outputRect: CGRect) -> CursorImage? {
         let minDimension = min(outputRect.width, outputRect.height)
         let height = max(28, minDimension * 0.044 * settings.cursorScale)
-        let width = height * 0.72
-        let padding = max(4, height * 0.08)
+        let designSize = CGSize(width: 32, height: 36)
+        let scale = height / designSize.height
+        let width = designSize.width * scale
+        let padding = max(5, height * 0.12)
         let imageSize = CGSize(width: ceil(width + (padding * 2)), height: ceil(height + (padding * 2)))
         guard imageSize.width > 0, imageSize.height > 0 else { return nil }
 
@@ -262,15 +264,22 @@ final class VideoCompositor {
         context.setShouldAntialias(true)
         context.clear(CGRect(origin: .zero, size: imageSize))
 
-        let tip = CGPoint(x: padding, y: imageSize.height - padding)
+        func p(_ x: CGFloat, _ yFromTop: CGFloat) -> CGPoint {
+            CGPoint(
+                x: padding + (x * scale),
+                y: padding + ((designSize.height - yFromTop) * scale)
+            )
+        }
+
+        let tip = p(5, 2)
         let path = CGMutablePath()
         path.move(to: tip)
-        path.addLine(to: CGPoint(x: padding, y: padding + (height * 0.12)))
-        path.addLine(to: CGPoint(x: padding + (width * 0.34), y: padding + (height * 0.38)))
-        path.addLine(to: CGPoint(x: padding + (width * 0.52), y: padding))
-        path.addLine(to: CGPoint(x: padding + (width * 0.74), y: padding + (height * 0.10)))
-        path.addLine(to: CGPoint(x: padding + (width * 0.56), y: padding + (height * 0.47)))
-        path.addLine(to: CGPoint(x: padding + width, y: padding + (height * 0.47)))
+        path.addLine(to: p(5, 31))
+        path.addLine(to: p(13.4, 22.6))
+        path.addLine(to: p(18.2, 34))
+        path.addLine(to: p(24.2, 31.5))
+        path.addLine(to: p(19.5, 20.6))
+        path.addLine(to: p(31, 20.6))
         path.closeSubpath()
 
         context.addPath(path)
@@ -279,8 +288,9 @@ final class VideoCompositor {
 
         context.addPath(path)
         context.setStrokeColor(CGColor(red: 0.02, green: 0.02, blue: 0.025, alpha: 0.92))
-        context.setLineWidth(max(2, height * 0.055))
+        context.setLineWidth(max(2, height * 0.052))
         context.setLineJoin(.round)
+        context.setLineCap(.round)
         context.strokePath()
 
         guard let cgImage = context.makeImage() else { return nil }
