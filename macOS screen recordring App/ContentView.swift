@@ -685,7 +685,6 @@ private struct PreviewOverlayDragLayer: View {
     let onMove: (CGPoint, CGSize) -> Void
 
     @State private var isHovering = false
-    @State private var dragStartCenter: CGPoint?
 
     var body: some View {
         GeometryReader { proxy in
@@ -722,32 +721,149 @@ private struct PreviewOverlayDragLayer: View {
                             .background(.black.opacity(0.48), in: Circle())
                     }
                 }
+                .overlay {
+                    PreviewOverlayDragSurface(
+                        shape: shape,
+                        center: center,
+                        onHoverChanged: { hovering in
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                isHovering = hovering
+                            }
+                        },
+                        onMove: { displayPoint in
+                            onMove(displayPoint, size)
+                        }
+                    )
+                }
                 .frame(width: side, height: side)
                 .position(center)
-                .contentShape(OverlayPreviewShape(overlayShape: shape))
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            let start = dragStartCenter ?? center
-                            dragStartCenter = start
-                            onMove(
-                                CGPoint(
-                                    x: start.x + value.translation.width,
-                                    y: start.y + value.translation.height
-                                ),
-                                size
-                            )
-                        }
-                        .onEnded { _ in
-                            dragStartCenter = nil
-                        }
-                )
-                .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.12)) {
-                        isHovering = hovering
-                    }
-                }
                 .help("Drag to position webcam")
+        }
+    }
+}
+
+private struct PreviewOverlayDragSurface: NSViewRepresentable {
+    let shape: OverlayShape
+    let center: CGPoint
+    let onHoverChanged: (Bool) -> Void
+    let onMove: (CGPoint) -> Void
+
+    func makeNSView(context: Context) -> PreviewOverlayDragSurfaceView {
+        let view = PreviewOverlayDragSurfaceView()
+        view.overlayShape = shape
+        view.centerPoint = center
+        view.onHoverChanged = onHoverChanged
+        view.onMove = onMove
+        return view
+    }
+
+    func updateNSView(_ nsView: PreviewOverlayDragSurfaceView, context: Context) {
+        nsView.overlayShape = shape
+        nsView.centerPoint = center
+        nsView.onHoverChanged = onHoverChanged
+        nsView.onMove = onMove
+    }
+}
+
+private final class PreviewOverlayDragSurfaceView: NSView {
+    var overlayShape: OverlayShape = .circle
+    var centerPoint: CGPoint = .zero
+    var onHoverChanged: (Bool) -> Void = { _ in }
+    var onMove: (CGPoint) -> Void = { _ in }
+
+    private var dragStartWindowPoint: CGPoint?
+    private var dragStartCenter: CGPoint?
+    private var isHoveringShape = false
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0, shapeContains(point) else { return nil }
+        return self
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+
+        for trackingArea in trackingAreas {
+            removeTrackingArea(trackingArea)
+        }
+
+        addTrackingArea(
+            NSTrackingArea(
+                rect: bounds,
+                options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
+                owner: self
+            )
+        )
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        updateHoverState(for: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateHoverState(for: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setHovering(false)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStartWindowPoint = event.locationInWindow
+        dragStartCenter = centerPoint
+        setHovering(true)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let dragStartWindowPoint, let dragStartCenter else { return }
+
+        onMove(
+            CGPoint(
+                x: dragStartCenter.x + event.locationInWindow.x - dragStartWindowPoint.x,
+                y: dragStartCenter.y + dragStartWindowPoint.y - event.locationInWindow.y
+            )
+        )
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartWindowPoint = nil
+        dragStartCenter = nil
+        updateHoverState(for: event)
+    }
+
+    private func updateHoverState(for event: NSEvent) {
+        setHovering(shapeContains(convert(event.locationInWindow, from: nil)))
+    }
+
+    private func setHovering(_ hovering: Bool) {
+        guard isHoveringShape != hovering else { return }
+        isHoveringShape = hovering
+        onHoverChanged(hovering)
+    }
+
+    private func shapeContains(_ point: CGPoint) -> Bool {
+        guard bounds.contains(point) else { return false }
+
+        switch overlayShape {
+        case .circle:
+            let radiusX = bounds.width / 2
+            let radiusY = bounds.height / 2
+            guard radiusX > 0, radiusY > 0 else { return false }
+            let normalizedX = (point.x - bounds.midX) / radiusX
+            let normalizedY = (point.y - bounds.midY) / radiusY
+            return normalizedX * normalizedX + normalizedY * normalizedY <= 1
+        case .roundedSquare:
+            let radius = min(bounds.width, bounds.height) * 0.22
+            return NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).contains(point)
+        case .square:
+            return true
         }
     }
 }

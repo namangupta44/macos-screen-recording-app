@@ -58,3 +58,7 @@
 ## 2026-04-24 15:07 IST
 
 - Keep live preview compositing off the main actor. The preview path should throttle to about 20fps, render the latest available frame on a dedicated serial queue, drop stale pending frames, and only publish the finished `NSImage`/`CGImage` back to SwiftUI on the main actor; otherwise `CIContext.createCGImage` plus webcam/cursor effects can make the preview window feel hung.
+
+## 2026-04-24 15:31 IST
+
+- The main window uses `isMovableByWindowBackground = true`, so SwiftUI-only drag gestures in the preview can be preempted by AppKit window dragging. Interactive preview regions such as the facecam position handle should use an `NSViewRepresentable` hit-test surface with `mouseDownCanMoveWindow = false` and handle `mouseDragged` itself.
