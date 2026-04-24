@@ -62,3 +62,7 @@
 ## 2026-04-24 15:31 IST
 
 - The main window uses `isMovableByWindowBackground = true`, so SwiftUI-only drag gestures in the preview can be preempted by AppKit window dragging. Interactive preview regions such as the facecam position handle should use an `NSViewRepresentable` hit-test surface with `mouseDownCanMoveWindow = false` and handle `mouseDragged` itself.
+
+## 2026-04-24 15:44 IST
+
+- The app target already points `ASSETCATALOG_COMPILER_APPICON_NAME` at `AppIcon`, so Dock/App Switcher icon fixes should populate `Assets.xcassets/AppIcon.appiconset` with actual PNG files and `filename` entries in `Contents.json`; no Swift runtime icon code is needed.
