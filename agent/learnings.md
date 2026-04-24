@@ -86,3 +86,7 @@
 ## 2026-04-24 16:25 IST
 
 - Click rings must store their own normalized click location at mouse-down time instead of reusing the live cursor location each frame. Otherwise the pulse appears to drag with the cursor after a click; `VideoCompositor` should map the saved click point into the fitted or zoomed output before drawing the ring.
+
+## 2026-04-24 16:40 IST
+
+- Xcode 26.4.1 can crash `swift-frontend` during Release archive with `SwiftCompile failed with a nonzero exit code` when this project uses Release `-O` whole-module optimization. Setting the Release build setting `SWIFT_OPTIMIZATION_LEVEL = "-Onone"` avoids the optimizer crash and lets Product > Archive complete.
