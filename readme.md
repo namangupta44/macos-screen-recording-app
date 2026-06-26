@@ -2,6 +2,26 @@
 
 This is a native macOS screen recorder Xcode project.
 
+## Quick Copy-Paste Commands
+
+Local rebuild and install:
+
+```bash
+cd "/Users/naman/x code projects/macOS screen recordring App" && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project "macOS screen recordring App.xcodeproj" -scheme "macOS screen recordring App" -configuration Debug -derivedDataPath build/derived-data build && { osascript -e 'tell application "macOS screen recordring App" to quit' >/dev/null 2>&1 || true; } && sleep 1 && rm -rf "/Applications/macOS screen recordring App.app" && ditto "build/derived-data/Build/Products/Debug/macOS screen recordring App.app" "/Applications/macOS screen recordring App.app" && /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R -trusted "/Applications/macOS screen recordring App.app" && open "/Applications/macOS screen recordring App.app"
+```
+
+Share the app with someone:
+
+```bash
+cd "/Users/naman/x code projects/macOS screen recordring App" && rm -rf dist && mkdir -p dist && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project "macOS screen recordring App.xcodeproj" -scheme "macOS screen recordring App" -configuration Release -derivedDataPath build/derived-data build && ditto -c -k --keepParent "build/derived-data/Build/Products/Release/macOS screen recordring App.app" "dist/macOS-screen-recordring-app-update-16.zip"
+```
+
+Commit template:
+
+```bash
+cd "/Users/naman/x code projects/macOS screen recordring App" && rm -rf build dist && git status && git add . && git commit -m "update 16" && git push
+```
+
 ## Before Working
 
 Before making task-specific changes, search `agent/learnings.md` for related notes. That file has important project-specific fixes around ScreenCaptureKit permissions, cursor overlays, recording timing, and Xcode archive behavior.

@@ -16,6 +16,8 @@ final class CursorOverlayPanelManager {
     private var panel: NSPanel?
     private var renderTimer: DispatchSourceTimer?
     private var isSystemCursorHidden = false
+    private var isShowing = false
+    private var activeOverlaySessionID = 0
 
     init(stateStore: CursorStateStore) {
         self.stateStore = stateStore
@@ -24,6 +26,8 @@ final class CursorOverlayPanelManager {
     func show(contentRect: CGRect) {
         guard contentRect.width > 0, contentRect.height > 0 else { return }
 
+        activeOverlaySessionID += 1
+        isShowing = true
         state.contentSize = contentRect.size
 
         let panel = panel ?? makePanel()
@@ -32,10 +36,12 @@ final class CursorOverlayPanelManager {
         panel.orderFrontRegardless()
         self.panel = panel
 
-        startRenderTimer()
+        startRenderTimer(sessionID: activeOverlaySessionID)
     }
 
     func hide() {
+        activeOverlaySessionID += 1
+        isShowing = false
         renderTimer?.cancel()
         renderTimer = nil
         panel?.orderOut(nil)
@@ -61,7 +67,7 @@ final class CursorOverlayPanelManager {
         return panel
     }
 
-    private func startRenderTimer() {
+    private func startRenderTimer(sessionID: Int) {
         renderTimer?.cancel()
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -72,6 +78,7 @@ final class CursorOverlayPanelManager {
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                guard self.isShowing, sessionID == self.activeOverlaySessionID else { return }
                 self.state.frameState = frameState
                 self.setSystemCursorHidden(frameState != nil)
             }

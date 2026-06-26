@@ -102,3 +102,7 @@
 ## 2026-06-26 17:36 IST
 
 - For this Xcode project, plain `xcodebuild` can fail when `xcode-select` points at `/Library/Developer/CommandLineTools`. Use `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` with `xcodebuild`, build into `build/derived-data`, then replace `/Applications/macOS screen recordring App.app` with `ditto` and register/open that exact app path so the locally installed app shows the newest changes.
+
+## 2026-06-26 17:58 IST
+
+- `NSCursor.hide()` / `NSCursor.unhide()` are effectively balanced calls, so cursor-overlay teardown must reject stale timer callbacks after `hide()`. If an old overlay frame calls `NSCursor.hide()` after recording stops, the real cursor can stay invisible and make the preview-composited cursor look trapped inside the preview window.
