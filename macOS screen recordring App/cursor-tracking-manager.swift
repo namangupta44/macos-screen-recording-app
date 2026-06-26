@@ -1,9 +1,10 @@
 import AppKit
 import Foundation
 
-@MainActor
 final class CursorTrackingManager {
     private let stateStore: CursorStateStore
+    private let queue = DispatchQueue(label: "recorder.cursor.tracking", qos: .userInteractive)
+
     private var contentRect: CGRect = .zero
     private var settings = CursorEffectSettings(
         cursorScale: 1.5,
@@ -12,47 +13,123 @@ final class CursorTrackingManager {
         isZoomEnabled: false,
         zoomScale: 2.0
     )
-    private var timer: Timer?
+    private var timer: DispatchSourceTimer?
+    private var localMouseDownMonitor: Any?
+    private var globalMouseDownMonitor: Any?
+    private var isTracking = false
     private var previousLeftButtonDown = false
     private var previousRightButtonDown = false
     private var lastLeftClick: TrackedCursorClick?
     private var lastRightClick: TrackedCursorClick?
-    private var smoothedLocation: CGPoint?
 
     private let pulseDuration: TimeInterval = 0.55
-    private let smoothing: CGFloat = 0.35
 
     init(stateStore: CursorStateStore) {
         self.stateStore = stateStore
     }
 
     func start(contentRect: CGRect, settings: CursorEffectSettings) {
-        stop()
-        self.contentRect = contentRect
-        self.settings = settings
-        sample()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.sample()
-            }
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            self.stopLocked()
+            self.contentRect = contentRect
+            self.settings = settings
+            self.isTracking = true
+            self.sample()
+            self.startTimerLocked()
         }
+
+        installClickMonitors()
     }
 
     func updateSettings(_ settings: CursorEffectSettings) {
-        self.settings = settings
-        sample()
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            self.settings = settings
+            self.sample()
+        }
     }
 
     func stop() {
-        timer?.invalidate()
+        queue.async { [weak self] in
+            self?.stopLocked()
+        }
+
+        removeClickMonitors()
+    }
+
+    private func startTimerLocked() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: 1.0 / 60.0, leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in
+            self?.sample()
+        }
+        self.timer = timer
+        timer.resume()
+    }
+
+    private func stopLocked() {
+        timer?.cancel()
         timer = nil
+        isTracking = false
         contentRect = .zero
         previousLeftButtonDown = false
         previousRightButtonDown = false
         lastLeftClick = nil
         lastRightClick = nil
-        smoothedLocation = nil
         stateStore.update(nil)
+    }
+
+    private func installClickMonitors() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+
+            self.removeClickMonitorsOnMain()
+
+            let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown]
+            self.localMouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+                self?.handleMouseDown(event)
+                return event
+            }
+            self.globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+                self?.handleMouseDown(event)
+            }
+        }
+    }
+
+    private func removeClickMonitors() {
+        DispatchQueue.main.async { [weak self] in
+            self?.removeClickMonitorsOnMain()
+        }
+    }
+
+    private func removeClickMonitorsOnMain() {
+        if let localMouseDownMonitor {
+            NSEvent.removeMonitor(localMouseDownMonitor)
+            self.localMouseDownMonitor = nil
+        }
+
+        if let globalMouseDownMonitor {
+            NSEvent.removeMonitor(globalMouseDownMonitor)
+            self.globalMouseDownMonitor = nil
+        }
+    }
+
+    private func handleMouseDown(_ event: NSEvent) {
+        queue.async { [weak self] in
+            guard let self, self.isTracking else { return }
+
+            switch event.type {
+            case .leftMouseDown:
+                self.registerClick(isLeftButton: true)
+            case .rightMouseDown:
+                self.registerClick(isLeftButton: false)
+            default:
+                break
+            }
+        }
     }
 
     private func sample() {
@@ -77,27 +154,49 @@ final class CursorTrackingManager {
             x: ((mouseLocation.x - contentRect.minX) / contentRect.width).clamped(to: 0...1),
             y: ((mouseLocation.y - contentRect.minY) / contentRect.height).clamped(to: 0...1)
         )
-        let location = smoothedLocation.map { previous in
-            CGPoint(
-                x: previous.x + ((rawLocation.x - previous.x) * smoothing),
-                y: previous.y + ((rawLocation.y - previous.y) * smoothing)
-            )
-        } ?? rawLocation
-        smoothedLocation = location
 
         if leftButtonDown && !previousLeftButtonDown {
-            lastLeftClick = TrackedCursorClick(date: now, normalizedLocation: location)
+            registerClick(isLeftButton: true, now: now, normalizedLocation: rawLocation)
         }
         if rightButtonDown && !previousRightButtonDown {
-            lastRightClick = TrackedCursorClick(date: now, normalizedLocation: location)
+            registerClick(isLeftButton: false, now: now, normalizedLocation: rawLocation)
         }
 
         previousLeftButtonDown = leftButtonDown
         previousRightButtonDown = rightButtonDown
 
+        publishState(now: now, normalizedLocation: rawLocation)
+    }
+
+    private func registerClick(isLeftButton: Bool) {
+        let now = Date()
+        let mouseLocation = NSEvent.mouseLocation
+        guard contentRect.contains(mouseLocation) else { return }
+
+        let normalizedLocation = CGPoint(
+            x: ((mouseLocation.x - contentRect.minX) / contentRect.width).clamped(to: 0...1),
+            y: ((mouseLocation.y - contentRect.minY) / contentRect.height).clamped(to: 0...1)
+        )
+
+        registerClick(isLeftButton: isLeftButton, now: now, normalizedLocation: normalizedLocation)
+        publishState(now: now, normalizedLocation: normalizedLocation)
+    }
+
+    private func registerClick(isLeftButton: Bool, now: Date, normalizedLocation: CGPoint) {
+        let click = TrackedCursorClick(date: now, normalizedLocation: normalizedLocation)
+        if isLeftButton {
+            lastLeftClick = click
+            previousLeftButtonDown = true
+        } else {
+            lastRightClick = click
+            previousRightButtonDown = true
+        }
+    }
+
+    private func publishState(now: Date, normalizedLocation: CGPoint) {
         stateStore.update(
             CursorFrameState(
-                normalizedLocation: location,
+                normalizedLocation: normalizedLocation,
                 leftClick: clickState(for: lastLeftClick, now: now),
                 rightClick: clickState(for: lastRightClick, now: now),
                 settings: settings

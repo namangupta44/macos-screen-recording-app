@@ -123,6 +123,7 @@ final class RecordingManager: ObservableObject {
     private let cameraFrameStore = LatestCameraFrameStore()
     private let cursorStateStore = CursorStateStore()
     private lazy var cursorTrackingManager = CursorTrackingManager(stateStore: cursorStateStore)
+    private lazy var cursorOverlayPanelManager = CursorOverlayPanelManager(stateStore: cursorStateStore)
     private lazy var previewRenderer: PreviewRenderPipeline = {
         let renderer = PreviewRenderPipeline(
             cameraFrameStore: cameraFrameStore,
@@ -453,6 +454,7 @@ final class RecordingManager: ObservableObject {
                 videoBitRate: screenRecordingQuality.videoBitRate(for: outputSize)
             )
             startCursorTracking(for: pickedSelection)
+            cursorOverlayPanelManager.show(contentRect: pickedSelection.contentRect)
 
             screenCaptureManager.onRecordingSampleBuffer = { [weak self] sampleBuffer in
                 self?.pipeline.appendScreen(sampleBuffer)
@@ -483,6 +485,7 @@ final class RecordingManager: ObservableObject {
 
         screenCaptureManager.onRecordingSampleBuffer = nil
         overlayPanelManager.hide()
+        cursorOverlayPanelManager.hide()
         cameraCaptureManager.onAudioSampleBuffer = nil
 
         do {
@@ -572,6 +575,7 @@ final class RecordingManager: ObservableObject {
             cameraCaptureManager.onAudioSampleBuffer = nil
             screenCaptureManager.onRecordingSampleBuffer = nil
             cursorTrackingManager.stop()
+            cursorOverlayPanelManager.hide()
             stopAccessingActiveRecordingFolder()
         }
 
@@ -791,6 +795,7 @@ final class RecordingManager: ObservableObject {
         screenCaptureManager.onRecordingSampleBuffer = nil
         cursorTrackingManager.stop()
         overlayPanelManager.hide()
+        cursorOverlayPanelManager.hide()
         cameraCaptureManager.onAudioSampleBuffer = nil
         pipeline.cancel()
         isRecording = false
@@ -948,7 +953,7 @@ private final class PreviewRenderPipeline: @unchecked Sendable {
     private let cursorStateStore: CursorStateStore
     private let outputSize: CGSize
     private let compositor = VideoCompositor()
-    private let throttleInterval: TimeInterval = 1.0 / 20.0
+    private let throttleInterval: TimeInterval = 1.0 / 30.0
 
     var onImage: ((CGImage) -> Void)?
 
@@ -1057,11 +1062,16 @@ private final class RecordingPipeline: @unchecked Sendable {
     private let overlayLayoutStore: OverlayLayoutStore
     private let cursorStateStore: CursorStateStore
     private let compositor = VideoCompositor()
+    private let renderInterval: TimeInterval = 1.0 / 30.0
+    private let frameDuration = CMTime(value: 1, timescale: 30)
 
     var onFailure: ((Error) -> Void)?
 
     private var writer: AssetWriterManager?
     private var terminalError: Error?
+    private var latestScreenPixelBuffer: CVPixelBuffer?
+    private var renderTimer: DispatchSourceTimer?
+    private var lastRenderedPresentationTime: CMTime?
 
     init(
         cameraFrameStore: LatestCameraFrameStore,
@@ -1074,30 +1084,39 @@ private final class RecordingPipeline: @unchecked Sendable {
     }
 
     func start(outputURL: URL, outputSize: CGSize, videoBitRate: Int) throws {
-        terminalError = nil
-        writer = try AssetWriterManager(
-            outputURL: outputURL,
-            outputSize: outputSize,
-            videoBitRate: videoBitRate
-        )
+        var startResult: Result<Void, Error> = .success(())
+
+        queue.sync {
+            self.cancelRenderTimerLocked()
+            self.terminalError = nil
+            self.latestScreenPixelBuffer = nil
+            self.lastRenderedPresentationTime = nil
+
+            do {
+                self.writer = try AssetWriterManager(
+                    outputURL: outputURL,
+                    outputSize: outputSize,
+                    videoBitRate: videoBitRate
+                )
+                self.startRenderTimerLocked()
+            } catch {
+                self.writer = nil
+                startResult = .failure(error)
+            }
+        }
+
+        try startResult.get()
     }
 
     func appendScreen(_ sampleBuffer: CMSampleBuffer) {
         queue.async {
             guard self.terminalError == nil else { return }
-            guard let writer = self.writer, let screenPixelBuffer = sampleBuffer.imageBuffer else { return }
+            guard sampleBuffer.isValid, let screenPixelBuffer = sampleBuffer.imageBuffer else { return }
 
-            do {
-                try writer.appendVideo(
-                    screenPixelBuffer: screenPixelBuffer,
-                    cameraPixelBuffer: self.cameraFrameStore.current(),
-                    overlay: self.overlayLayoutStore.current(),
-                    cursor: self.cursorStateStore.current(),
-                    at: sampleBuffer.presentationTimeStamp,
-                    compositor: self.compositor
-                )
-            } catch {
-                self.fail(with: error)
+            self.latestScreenPixelBuffer = screenPixelBuffer
+
+            if self.lastRenderedPresentationTime == nil {
+                self.renderLatestFrame(preferredTime: sampleBuffer.presentationTimeStamp)
             }
         }
     }
@@ -1127,8 +1146,13 @@ private final class RecordingPipeline: @unchecked Sendable {
                     return
                 }
 
+                self.cancelRenderTimerLocked()
+                self.renderLatestFrame(preferredTime: self.currentHostTime())
+                self.writer = nil
+                self.latestScreenPixelBuffer = nil
+                self.lastRenderedPresentationTime = nil
+
                 writer.finish { result in
-                    self.writer = nil
                     continuation.resume(with: result)
                 }
             }
@@ -1137,16 +1161,75 @@ private final class RecordingPipeline: @unchecked Sendable {
 
     func cancel() {
         queue.async {
+            self.cancelRenderTimerLocked()
             self.writer?.cancel()
             self.terminalError = nil
             self.writer = nil
+            self.latestScreenPixelBuffer = nil
+            self.lastRenderedPresentationTime = nil
         }
+    }
+
+    private func startRenderTimerLocked() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + renderInterval, repeating: renderInterval, leeway: .milliseconds(4))
+        timer.setEventHandler { [weak self] in
+            self?.renderLatestFrame(preferredTime: self?.currentHostTime())
+        }
+        renderTimer = timer
+        timer.resume()
+    }
+
+    private func cancelRenderTimerLocked() {
+        renderTimer?.cancel()
+        renderTimer = nil
+    }
+
+    private func renderLatestFrame(preferredTime: CMTime?) {
+        guard terminalError == nil else { return }
+        guard let writer, let screenPixelBuffer = latestScreenPixelBuffer else { return }
+
+        do {
+            let presentationTime = nextPresentationTime(preferredTime)
+            try writer.appendVideo(
+                screenPixelBuffer: screenPixelBuffer,
+                cameraPixelBuffer: cameraFrameStore.current(),
+                overlay: overlayLayoutStore.current(),
+                cursor: cursorStateStore.current(),
+                at: presentationTime,
+                compositor: compositor
+            )
+            lastRenderedPresentationTime = presentationTime
+        } catch {
+            fail(with: error)
+        }
+    }
+
+    private func nextPresentationTime(_ preferredTime: CMTime?) -> CMTime {
+        var candidate = preferredTime?.isValid == true ? preferredTime! : currentHostTime()
+        if !candidate.isValid {
+            candidate = lastRenderedPresentationTime.map { CMTimeAdd($0, frameDuration) } ?? .zero
+        }
+
+        if let lastRenderedPresentationTime {
+            let minimumNextTime = CMTimeAdd(lastRenderedPresentationTime, frameDuration)
+            if CMTimeCompare(candidate, minimumNextTime) < 0 {
+                candidate = minimumNextTime
+            }
+        }
+
+        return candidate
+    }
+
+    private func currentHostTime() -> CMTime {
+        CMClockGetTime(CMClockGetHostTimeClock())
     }
 
     private func fail(with error: Error) {
         guard terminalError == nil else { return }
 
         terminalError = error
+        cancelRenderTimerLocked()
         writer?.cancel()
         let onFailure = onFailure
 

@@ -178,7 +178,8 @@ final class VideoCompositor {
                 to: effectImage,
                 at: clickPoint(for: click, in: contentFrame, zoomTransform: zoomTransform),
                 progress: click.progress,
-                color: CGColor(red: 1.0, green: 0.72, blue: 0.06, alpha: 1.0)
+                color: CGColor(red: 1.0, green: 0.72, blue: 0.06, alpha: 1.0),
+                outputRect: outputRect
             )
         }
 
@@ -187,7 +188,8 @@ final class VideoCompositor {
                 to: effectImage,
                 at: clickPoint(for: click, in: contentFrame, zoomTransform: zoomTransform),
                 progress: click.progress,
-                color: CGColor(red: 0.26, green: 0.78, blue: 1.0, alpha: 1.0)
+                color: CGColor(red: 0.26, green: 0.78, blue: 1.0, alpha: 1.0),
+                outputRect: outputRect
             )
         }
 
@@ -208,15 +210,22 @@ final class VideoCompositor {
         return zoomTransform?.point(for: unzoomedPoint) ?? unzoomedPoint
     }
 
-    private func addClickRing(to image: CIImage?, at point: CGPoint, progress: CGFloat, color: CGColor) -> CIImage? {
+    private func addClickRing(
+        to image: CIImage?,
+        at point: CGPoint,
+        progress: CGFloat,
+        color: CGColor,
+        outputRect: CGRect
+    ) -> CIImage? {
         let clampedProgress = progress.clamped(to: 0...1)
-        let radius = 22 + (58 * clampedProgress)
+        let scale = max(0.65, min(outputRect.width, outputRect.height) / 720)
+        let radius = (22 + (58 * clampedProgress)) * scale
         let alpha = max(0, 1 - clampedProgress)
         guard let ring = circleImage(
             radius: radius,
             fillColor: nil,
             strokeColor: color.copy(alpha: alpha),
-            lineWidth: max(4, 8 * (1 - clampedProgress))
+            lineWidth: max(4, 8 * (1 - clampedProgress) * scale)
         )?.translated(toCenter: point) else {
             return image
         }

@@ -90,3 +90,15 @@
 ## 2026-04-24 16:40 IST
 
 - Xcode 26.4.1 can crash `swift-frontend` during Release archive with `SwiftCompile failed with a nonzero exit code` when this project uses Release `-O` whole-module optimization. Setting the Release build setting `SWIFT_OPTIMIZATION_LEVEL = "-Onone"` avoids the optimizer crash and lets Product > Archive complete.
+
+## 2026-06-26 17:22 IST
+
+- Saved recordings must not depend on new `SCStream` screen frames for cursor and camera motion. Keep the latest screen `CVPixelBuffer`, run a steady recording render timer, and composite current cursor/camera stores against that buffer before writing to `AVAssetWriter`; otherwise cursor/facecam movement can freeze whenever the captured desktop is visually static.
+
+## 2026-06-26 17:32 IST
+
+- During recording, the user-facing screen must mirror the compositor cursor effects, not the default macOS cursor. Show a transparent, click-through app overlay over the selected `contentRect`, hide the system cursor only while the pointer is inside that rect, and keep the overlay fed from the same `CursorStateStore` used by preview and `AVAssetWriter` so live cursor size/click rings match the saved video.
+
+## 2026-06-26 17:36 IST
+
+- For this Xcode project, plain `xcodebuild` can fail when `xcode-select` points at `/Library/Developer/CommandLineTools`. Use `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` with `xcodebuild`, build into `build/derived-data`, then replace `/Applications/macOS screen recordring App.app` with `ditto` and register/open that exact app path so the locally installed app shows the newest changes.
