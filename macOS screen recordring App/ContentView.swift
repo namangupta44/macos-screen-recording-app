@@ -72,14 +72,12 @@ struct ContentView: View {
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 14) {
-                    sourceCard
+                    sourcesCard
                     recordingFolderCard
                     qualityCard
-                    permissionsCard
-                    cameraCard
-                    microphoneCard
                     webcamLookCard
                     cursorEffectsCard
+                    permissionsCard
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
@@ -118,48 +116,162 @@ struct ContentView: View {
         }
     }
 
-    private var sourceCard: some View {
+    private var sourcesCard: some View {
         SettingsCard(
-            icon: "rectangle.on.rectangle",
+            icon: "record.circle",
             iconTint: .blue,
-            title: "Screen Source"
+            title: "Sources"
         ) {
-            VStack(alignment: .leading, spacing: 10) {
-                if let name = recordingManager.pickedSourceName {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(name)
-                            .font(.system(size: 12, weight: .medium))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                } else {
-                    HStack(spacing: 8) {
-                        Image(systemName: "circle.dashed")
-                            .foregroundStyle(.secondary)
-                            .font(.system(size: 13))
-                        Text("No source chosen")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 12) {
+                screenSourceControl
+
+                Divider()
+
+                deviceSourceControl(
+                    title: "Camera",
+                    detail: selectedCameraDetail,
+                    systemImage: "video.fill",
+                    tint: .purple,
+                    isReady: recordingManager.selectedCameraID != nil && !recordingManager.cameraDevices.isEmpty
+                ) {
+                    if recordingManager.cameraDevices.isEmpty {
+                        emptyRow(text: "No cameras available")
+                    } else {
+                        Picker("", selection: $recordingManager.selectedCameraID) {
+                            ForEach(recordingManager.cameraDevices) { device in
+                                Text(device.name).tag(Optional(device.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity)
+                        .disabled(recordingManager.isRecording)
                     }
                 }
 
-                Button {
-                    recordingManager.presentScreenSourcePicker()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: recordingManager.hasPickedSource ? "arrow.triangle.2.circlepath" : "plus.circle.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(recordingManager.hasPickedSource ? "Change Source" : "Choose Source")
-                            .font(.system(size: 12, weight: .medium))
+                Divider()
+
+                deviceSourceControl(
+                    title: "Microphone",
+                    detail: selectedMicrophoneDetail,
+                    systemImage: "mic.fill",
+                    tint: .orange,
+                    isReady: recordingManager.selectedMicrophoneID != nil && !recordingManager.microphoneDevices.isEmpty
+                ) {
+                    if recordingManager.microphoneDevices.isEmpty {
+                        emptyRow(text: "No microphones available")
+                    } else {
+                        Picker("", selection: $recordingManager.selectedMicrophoneID) {
+                            ForEach(recordingManager.microphoneDevices) { device in
+                                Text(device.name).tag(Optional(device.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity)
+                        .disabled(recordingManager.isRecording)
                     }
-                    .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SidebarButtonStyle(tint: recordingManager.hasPickedSource ? .secondary : .blue))
-                .disabled(recordingManager.isRecording)
             }
+        }
+    }
+
+    private var screenSourceControl: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sourceControlHeader(
+                title: "Screen",
+                detail: recordingManager.pickedSourceName ?? "Choose a display or window",
+                systemImage: "rectangle.on.rectangle",
+                tint: .blue,
+                isReady: recordingManager.hasPickedSource
+            )
+
+            Button {
+                recordingManager.presentScreenSourcePicker()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: recordingManager.hasPickedSource ? "arrow.triangle.2.circlepath" : "plus.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(recordingManager.hasPickedSource ? "Change Screen Source" : "Choose Screen Source")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(SidebarButtonStyle(tint: recordingManager.hasPickedSource ? .secondary : .blue))
+            .disabled(recordingManager.isRecording)
+        }
+    }
+
+    private var selectedCameraDetail: String {
+        selectedDeviceName(id: recordingManager.selectedCameraID, devices: recordingManager.cameraDevices) ?? "Choose a camera"
+    }
+
+    private var selectedMicrophoneDetail: String {
+        selectedDeviceName(id: recordingManager.selectedMicrophoneID, devices: recordingManager.microphoneDevices) ?? "Choose a microphone"
+    }
+
+    private func selectedDeviceName(id: String?, devices: [CaptureDevice]) -> String? {
+        guard let id else { return nil }
+        return devices.first { $0.id == id }?.name
+    }
+
+    private func deviceSourceControl<Control: View>(
+        title: String,
+        detail: String,
+        systemImage: String,
+        tint: Color,
+        isReady: Bool,
+        @ViewBuilder control: () -> Control
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sourceControlHeader(
+                title: title,
+                detail: detail,
+                systemImage: systemImage,
+                tint: tint,
+                isReady: isReady
+            )
+
+            control()
+        }
+    }
+
+    private func sourceControlHeader(
+        title: String,
+        detail: String,
+        systemImage: String,
+        tint: Color,
+        isReady: Bool
+    ) -> some View {
+        HStack(spacing: 9) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(tint.opacity(0.14))
+                    .frame(width: 22, height: 22)
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: isReady ? "checkmark.circle.fill" : "circle.dashed")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isReady ? .green : .secondary)
+                .frame(width: 18, height: 18)
+                .help(isReady ? "\(title) selected" : "\(title) not selected")
         }
     }
 
@@ -220,24 +332,6 @@ struct ContentView: View {
         }
     }
 
-    private var cameraCard: some View {
-        SettingsCard(icon: "video.fill", iconTint: .purple, title: "Camera") {
-            if recordingManager.cameraDevices.isEmpty {
-                emptyRow(text: "No cameras available")
-            } else {
-                Picker("", selection: $recordingManager.selectedCameraID) {
-                    ForEach(recordingManager.cameraDevices) { device in
-                        Text(device.name).tag(Optional(device.id))
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-                .disabled(recordingManager.isRecording)
-            }
-        }
-    }
-
     private var qualityCard: some View {
         SettingsCard(icon: "slider.horizontal.3", iconTint: .green, title: "Quality") {
             VStack(alignment: .leading, spacing: 12) {
@@ -290,24 +384,6 @@ struct ContentView: View {
                 .labelsHidden()
                 .frame(width: 128)
                 .disabled(recordingManager.isRecording)
-        }
-    }
-
-    private var microphoneCard: some View {
-        SettingsCard(icon: "mic.fill", iconTint: .orange, title: "Microphone") {
-            if recordingManager.microphoneDevices.isEmpty {
-                emptyRow(text: "No microphones available")
-            } else {
-                Picker("", selection: $recordingManager.selectedMicrophoneID) {
-                    ForEach(recordingManager.microphoneDevices) { device in
-                        Text(device.name).tag(Optional(device.id))
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-                .disabled(recordingManager.isRecording)
-            }
         }
     }
 
